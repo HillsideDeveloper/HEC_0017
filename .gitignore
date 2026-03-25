@@ -1,0 +1,12 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Data Logs (DO NOT SHARE CLINICAL DATA)
+*.csv
+logs/
+
+# System files
+.DS_Store
+.venv
