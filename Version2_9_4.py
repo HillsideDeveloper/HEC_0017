@@ -1,8 +1,9 @@
-# --- VERSION 2.9.3 ---
+# --- VERSION 2.9.4 ---
 # 1. FIXED: Disk logging slowed to exactly 1.0s intervals.
 # 2. NEW: 24-Hour Flow Variance Graph (Plots 1 point every 5 minutes).
 # 3. STABILITY: Retained all v2.9.2 Deadlock and Syringe fixes.
 # 4. UI: Matplotlib integration for long-term perfusion monitoring.
+# 5. Updated Board 1 to correct flow variable index idx[6].
 
 import tkinter as tk
 from tkinter import scrolledtext, filedialog, messagebox
@@ -24,7 +25,7 @@ SYRINGE_DIA = "29.70"
 class ClinicalConsole:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kidney Device Console v2.9.3")
+        self.root.title("Kidney Device Console v2.9.4")
         self.root.geometry("1400x950")
         
         # --- UI Data State ---
@@ -293,13 +294,22 @@ class ClinicalConsole:
             except: threading.Event().wait(2.0)
 
     def parse_board_one(self, l):
-        if "A," in l and ",B" in l:
+        # A, P1, P2, P3, PRESS, Temp, FLOW, ...
+        if "A," in l:
             self.health_counts["Board1"] += 1
             try:
-                d = l.split(",B")[0].split(',')
-                f_v = float(d[1]); self.pulse_data["Flow"].append(f_v)
-                self.flow_val, self.press_val = f"{f_v:.2f}", f"{float(d[4]):.2f}"
-            except: pass
+                parts = l.split(',')
+                
+                # Flow confirmed at Index 6
+                f_v = float(parts[6]) 
+                self.pulse_data["Flow"].append(f_v)
+                self.flow_val = f"{f_v:.2f}"
+                
+                # Pressure confirmed at Index 4
+                p_v = float(parts[4]) 
+                self.press_val = f"{p_v:.2f}"
+                
+            except (IndexError, ValueError): pass
 
     def global_emergency_stop(self):
         self.heater_pwm.set(0); self.air_valve.set(False); self.send_b1_cmd()
