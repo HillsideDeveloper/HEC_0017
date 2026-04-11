@@ -1,8 +1,9 @@
-# --- VERSION 3.1.0-PID-THERMAL ---
+# --- VERSION 3.1.1-PID-THERMAL ---
 # 1. DUAL PID: Pressure (Index 4 -> RPM) and Temperature (Terumo -> Heater PWM).
 # 2. WATCHDOG: Automatic Board 1 pulse every 2.0s to clear hardware watchdog.
 # 3. SAFETY: Heater interlock forces PWM to 0 if pump speed < 100 RPM.
 # 4. UI: Added Auto-Temp toggle and 18C-40C setpoint scale.
+# 5. Added individual anti-windup terms and changed the gains of the thermal controller.
 
 import tkinter as tk
 from tkinter import scrolledtext, filedialog, messagebox
@@ -22,18 +23,23 @@ PORT_BOARD_1 = 9008
 SYRINGE_DIA = "29.70" 
 
 class PID:
-    def __init__(self, kp, ki, kd, setpoint, output_limits=(None, None)):
+    def __init__(self, kp, ki, kd, setpoint, output_limits=(None, None), windup_limit=500):
         self.kp, self.ki, self.kd = kp, ki, kd
         self.setpoint = setpoint
         self.integral = 0
         self.last_error = 0
         self.min_out, self.max_out = output_limits
+        self.windup_limit = windup_limit  # Separate limit for each instance
 
     def update(self, measurement, dt=1.0):
         error = self.setpoint - measurement
-        self.integral = max(min(self.integral + (error * dt), 500), -500) # Anti-windup
+        
+        # Apply anti-windup using this instance's specific limit
+        self.integral = max(min(self.integral + (error * dt), self.windup_limit), -self.windup_limit)
+        
         derivative = (error - self.last_error) / dt
         output = (self.kp * error) + (self.ki * self.integral) + (self.kd * derivative)
+        
         self.last_error = error
         
         if self.min_out is not None: output = max(self.min_out, output)
@@ -43,7 +49,7 @@ class PID:
 class ClinicalConsole:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kidney Device Console v3.1.0-PID-Thermal")
+        self.root.title("Kidney Device Console v3.1.1-PID-Thermal")
         self.root.geometry("1450x980")
         
         # --- UI Data State ---
@@ -54,11 +60,28 @@ class ClinicalConsole:
         # PID Controllers
         self.auto_mode = tk.BooleanVar(value=False)
         self.press_setpoint = tk.DoubleVar(value=60.0)
-        self.press_pid = PID(kp=1.5, ki=0.05, kd=0.2, setpoint=60.0)
+        #self.press_pid = PID(kp=1.5, ki=0.05, kd=0.2, setpoint=60.0)
+        # --- PRESSURE PID (Unchanged for Safety) ---
+        self.press_pid = PID(
+            kp=1.5, 
+            ki=0.05, 
+            kd=0.2, 
+            setpoint=60.0, 
+            windup_limit=500
+        )
         
         self.temp_auto_mode = tk.BooleanVar(value=False)
         self.temp_setpoint = tk.DoubleVar(value=37.0)
-        self.temp_pid = PID(kp=8.0, ki=0.1, kd=0.5, setpoint=37.0, output_limits=(0, 180))
+        #self.temp_pid = PID(kp=8.0, ki=0.1, kd=0.5, setpoint=37.0, output_limits=(0, 180))
+        # --- TEMPERATURE PID (Increased Gains to close 11C gap) ---
+        self.temp_pid = PID(
+            kp=15.0,        # Stronger initial push
+            ki=0.5,         # Faster elimination of steady-state error
+            kd=1.0,         # Damping for approach to 37C
+            setpoint=37.0, 
+            output_limits=(0, 180), 
+            windup_limit=2000 # High capacity to overcome room heat loss
+        )
         
         self.last_b1_send_time = datetime.now()
         
