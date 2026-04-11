@@ -1,6 +1,8 @@
-# Kidney Perfusion Control System v2.9.3
+# Kidney Perfusion Control System v3.1.0
 
 A high-resilience clinical console for ex-vivo kidney perfusion, running on Raspberry Pi 5.
+Includes PID controllers for perfusate temperature and arterial pressure with user selectable
+targets.
 
 ## Hardware Architecture
 - **Host:** Raspberry Pi 5 (4GB)
@@ -20,4 +22,4 @@ A high-resilience clinical console for ex-vivo kidney perfusion, running on Rasp
 ## Installation
 1. Ensure `python3-tk` and `python3-matplotlib` are installed.
 2. Configure ES-279 to the static IP `192.168.127.254`.
-3. Run `python3 Version2_9_3.py`.
+3. Run `python3 Version3_1_0.py`.
