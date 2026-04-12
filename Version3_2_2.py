@@ -1,5 +1,5 @@
-# --- VERSION 3.2.1 ---
-# 1. HARDWARE TEST: Increased Heater PWM ceiling to 220 to overcome 30C plateau.
+# --- VERSION 3.2.2 ---
+# 1. HARDWARE TEST: Increased Heater PWM ceiling to 240 to overcome 35C plateau.
 # 2. SAFETY: Heater forced to 0 if Pump communication fails (Interlock).
 # 3. SAFETY: Pump maintains last RPM if Board 1 fails (Fail-Last-Setting).
 # 4. DIAGNOSTIC: 5-minute Terminal Health Pulse restored.
@@ -45,7 +45,7 @@ class PID:
 class ClinicalConsole:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kidney Device Console v3.2.1 (Extended Thermal)")
+        self.root.title("Kidney Device Console v3.2.2")
         self.root.geometry("1450x980")
         
         # --- UI Data State ---
@@ -64,8 +64,8 @@ class ClinicalConsole:
         
         self.temp_auto_mode = tk.BooleanVar(value=False)
         self.temp_setpoint = tk.DoubleVar(value=37.0)
-        # Ceiling increased to 220 for hardware test
-        self.temp_pid = PID(kp=15.0, ki=0.5, kd=1.0, setpoint=37.0, output_limits=(0, 220), windup_limit=2000)
+        # Ceiling increased to 240 for hardware test
+        self.temp_pid = PID(kp=15.0, ki=0.5, kd=1.0, setpoint=37.0, output_limits=(0, 240), windup_limit=2000)
         
         self.last_b1_send_time = datetime.now()
         self.last_terumo_packet_time = datetime.now()
@@ -210,13 +210,13 @@ class ClinicalConsole:
         self.rpm_ent = tk.Entry(bp, justify='center'); self.rpm_ent.insert(0, "1000"); self.rpm_ent.pack()
         self.rpm_actual_lbl = tk.Label(bp, text="Actual: 0 RPM", font=('Arial', 10, 'bold')); self.rpm_actual_lbl.pack()
 
-        # Thermal Sidebar (Limit 220)
+        # Thermal Sidebar (Limit 240)
         b1 = tk.LabelFrame(self.sidebar, text=" Thermal Control (Board 1) "); b1.pack(fill=tk.X, pady=5)
         tk.Checkbutton(b1, text="ENABLE AUTO TEMP", variable=self.temp_auto_mode, fg="orange").pack()
         tk.Label(b1, text="Target Temp (18-40C):").pack()
         tk.Scale(b1, from_=18, to=40, resolution=0.1, orient=tk.HORIZONTAL, variable=self.temp_setpoint).pack(fill=tk.X)
-        tk.Label(b1, text="Man. Heater PWM (0-220):").pack()
-        tk.Scale(b1, from_=0, to=220, orient=tk.HORIZONTAL, variable=self.heater_pwm).pack(fill=tk.X)
+        tk.Label(b1, text="Man. Heater PWM (0-240):").pack()
+        tk.Scale(b1, from_=0, to=240, orient=tk.HORIZONTAL, variable=self.heater_pwm).pack(fill=tk.X)
         tk.Checkbutton(b1, text="Air Valve", variable=self.air_valve).pack(anchor="w")
         tk.Checkbutton(b1, text="Heat Mode", variable=self.heat_dir).pack(anchor="w")
         tk.Button(b1, text="UPDATE BOARD 1", bg="blue", fg="white", command=self.send_b1_cmd).pack(fill=tk.X, pady=5)
