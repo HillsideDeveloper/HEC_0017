@@ -65,7 +65,7 @@ class ClinicalConsole:
         self.temp_auto_mode = tk.BooleanVar(value=False)
         self.temp_setpoint = tk.DoubleVar(value=37.0)
         # Ceiling increased to 240 for hardware test
-        self.temp_pid = PID(kp=15.0, ki=0.2, kd=4.0, setpoint=37.0, output_limits=(0, 240), windup_limit=1000)
+        self.temp_pid = PID(kp=15.0, ki=0.2, kd=4.0, setpoint=37.0, output_limits=(0, 240), windup_limit=1500)
         
         self.last_b1_send_time = datetime.now()
         self.last_terumo_packet_time = datetime.now()
