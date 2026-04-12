@@ -1,4 +1,4 @@
-# --- VERSION 3.2.3 ---
+# --- VERSION 3.3.0 ---
 # 1. HARDWARE TEST: Increased Heater PWM ceiling to 240 to overcome 35C plateau.
 # 2. SAFETY: Heater forced to 0 if Pump communication fails (Interlock).
 # 3. SAFETY: Pump maintains last RPM if Board 1 fails (Fail-Last-Setting).
@@ -45,7 +45,7 @@ class PID:
 class ClinicalConsole:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kidney Device Console v3.2.3")
+        self.root.title("Kidney Device Console v3.3.0")
         self.root.geometry("1450x980")
         
         # --- UI Data State ---
@@ -271,16 +271,33 @@ class ClinicalConsole:
 
     def refresh_ui_labels(self):
         try:
-            self.metrics["PH"].config(text=self.ph_val); self.metrics["PO2"].config(text=self.po2_val)
-            self.metrics["PCO2"].config(text=self.pco2_val); self.metrics["TEMP"].config(text=self.temp_val)
-            self.metrics["PRESS"].config(text=self.press_val); self.metrics["FLOW"].config(text=self.flow_val)
+            # Update Dashboard Metrics
+            self.metrics["PH"].config(text=self.ph_val)
+            self.metrics["PO2"].config(text=self.po2_val)
+            self.metrics["PCO2"].config(text=self.pco2_val)
+            self.metrics["TEMP"].config(text=self.temp_val)
+            self.metrics["PRESS"].config(text=self.press_val)
+            self.metrics["FLOW"].config(text=self.flow_val)
             self.rpm_actual_lbl.config(text=f"Actual: {self.actual_rpm} RPM")
+            
+            # 1Hz CSV Logging Logic
             if self.is_logging and self.log_counter % 2 == 0:
                 with open(self.log_filepath, 'a', newline='') as f:
-                    csv.writer(f).writerow([datetime.now().strftime("%H:%M:%S"), self.ph_val, self.pco2_val, self.po2_val, self.temp_val, self.actual_rpm, self.press_val, self.flow_val])
+                    csv.writer(f).writerow([
+                        datetime.now().strftime("%H:%M:%S"), 
+                        self.ph_val, self.pco2_val, self.po2_val, 
+                        self.temp_val, self.actual_rpm, self.press_val, self.flow_val
+                    ])
+            
+            # Graph Update Logic (Every 10 seconds / 20 UI ticks)
+            if self.log_counter % 20 == 0:
+                self.update_flow_graph()
+
             self.log_counter += 1
             self.log_led.itemconfig(self.log_circle, fill="blue" if self.is_logging else "gray")
-        except: pass
+        except Exception as e:
+            print(f"UI Refresh Error: {e}")
+            
         self.root.after(500, self.refresh_ui_labels)
 
     def global_emergency_stop(self):
@@ -367,13 +384,29 @@ class ClinicalConsole:
                 if "S" in s.recv(1024).decode('ascii'): self.syringe_pump_action(p, "5.0", "RUN")
         except: pass
 
-    def update_flow_graph(self):
+   def update_flow_graph(self):
         try:
-            self.flow_history.append(float(self.flow_val)); self.time_history.append(datetime.now().strftime("%H:%M"))
-            if len(self.flow_history) > self.max_graph_points: self.flow_history.pop(0); self.time_history.pop(0)
-            self.ax.clear(); self.ax.plot(self.time_history, self.flow_history, color='green')
-            self.ax.set_xticks(self.time_history[::48]); self.canvas.draw()
-        except: pass
+            val = float(self.flow_val)
+            self.flow_history.append(val)
+            self.time_history.append(datetime.now().strftime("%H:%M"))
+            
+            # Keep only the last 24 hours (288 points if sampled every 5 mins)
+            # Since we are calling this more frequently for testing, 
+            # you may want to increase max_graph_points or use a time-gate
+            if len(self.flow_history) > self.max_graph_points:
+                self.flow_history.pop(0)
+                self.time_history.pop(0)
+            
+            self.ax.clear()
+            self.ax.plot(self.time_history, self.flow_history, color='green', linewidth=1.5)
+            self.ax.set_ylabel("LPM")
+            # Only show X-axis labels every 48 points to keep it clean
+            self.ax.set_xticks(self.time_history[::48])
+            self.ax.tick_params(axis='x', rotation=45, labelsize=7)
+            self.fig.tight_layout()
+            self.canvas.draw()
+        except (ValueError, IndexError):
+            pass
 
 if __name__ == "__main__":
     root = tk.Tk(); app = ClinicalConsole(root); root.mainloop()
