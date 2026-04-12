@@ -1,4 +1,4 @@
-# --- VERSION 3.2.2 ---
+# --- VERSION 3.2.3 ---
 # 1. HARDWARE TEST: Increased Heater PWM ceiling to 240 to overcome 35C plateau.
 # 2. SAFETY: Heater forced to 0 if Pump communication fails (Interlock).
 # 3. SAFETY: Pump maintains last RPM if Board 1 fails (Fail-Last-Setting).
@@ -45,7 +45,7 @@ class PID:
 class ClinicalConsole:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kidney Device Console v3.2.2")
+        self.root.title("Kidney Device Console v3.2.3")
         self.root.geometry("1450x980")
         
         # --- UI Data State ---
@@ -65,7 +65,7 @@ class ClinicalConsole:
         self.temp_auto_mode = tk.BooleanVar(value=False)
         self.temp_setpoint = tk.DoubleVar(value=37.0)
         # Ceiling increased to 240 for hardware test
-        self.temp_pid = PID(kp=15.0, ki=0.5, kd=1.0, setpoint=37.0, output_limits=(0, 240), windup_limit=2000)
+        self.temp_pid = PID(kp=15.0, ki=0.2, kd=4.0, setpoint=37.0, output_limits=(0, 240), windup_limit=1000)
         
         self.last_b1_send_time = datetime.now()
         self.last_terumo_packet_time = datetime.now()
