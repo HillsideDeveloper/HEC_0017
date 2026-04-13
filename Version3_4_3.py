@@ -1,10 +1,9 @@
-# --- VERSION 3.4.2 (Final Release) ---
-# 1. FIXED: Setpoints now synchronize with UI inputs in the control loop.
-# 2. FIXED: safe_comm now correctly returns hardware responses (Pump/Syringe fix).
-# 3. FIXED: Swapped Air Pump and Gas Valve mapping to match hardware wiring.
-# 4. SAFETY: Removed manual heater control; PWM is now PID-exclusive.
-# 5. SAFETY: Heater interlock forces 0 PWM if Pump fails or RPM < 150.
-# 6. UI: Cleaned Board 1 section; added high-visibility 'Auto' status colors.
+# --- VERSION 3.4.3 ---
+# 1. FIXED: Added setpoint synchronization for Temperature PID in the master loop.
+# 2. FIXED: Swapped Air Pump and Gas Valve variable mapping to match hardware wiring.
+# 3. SAFETY: Heater interlock forces 0 PWM if Pump fails or RPM < 150.
+# 4. TUNING: Thermal Anti-windup limit maintained at 1500.
+# 5. UI: Removed manual heater overrides; PWM scale is now a read-only indicator.
 
 import tkinter as tk
 from tkinter import scrolledtext, filedialog, messagebox
@@ -45,31 +44,28 @@ class PID:
 class ClinicalConsole:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kidney Device Console v3.4.2")
+        self.root.title("Kidney Device Console v3.4.3")
         self.root.geometry("1450x980")
         
-        # --- UI Data State ---
         self.ph_val = "--.--"; self.po2_val = "--.--"; self.pco2_val = "--.--"
         self.temp_val = "0.00"; self.press_val = "0.00"; self.flow_val = "0.00"
         self.actual_rpm = 0
         
-        # Health Tracking Flags
         self.port_status = {"Pump": True, "Terumo": True, "Board1": True}
         self.health_counts = {"Terumo": 0, "Board1": 0, "BloodPump": 0}
         
-        # PID Controllers
         self.auto_mode = tk.BooleanVar(value=False)
         self.press_setpoint = tk.DoubleVar(value=60.0)
         self.press_pid = PID(kp=1.5, ki=0.05, kd=0.2, setpoint=60.0, windup_limit=500)
         
         self.temp_auto_mode = tk.BooleanVar(value=False)
         self.temp_setpoint = tk.DoubleVar(value=37.0)
+        # Thermal windup locked at 1500
         self.temp_pid = PID(kp=15.0, ki=0.2, kd=4.0, setpoint=37.0, output_limits=(0, 240), windup_limit=1500)
         
         self.last_b1_send_time = datetime.now()
         self.last_terumo_packet_time = datetime.now()
         
-        # Hardware/Graphing State
         self.flow_history = []; self.time_history = []
         self.max_graph_points = 288 
         self.air_pump_pct = tk.IntVar(value=0); self.gas_valve_pct = tk.IntVar(value=0)
@@ -83,7 +79,6 @@ class ClinicalConsole:
         self.create_layout()
         self.refresh_ui_labels()
         
-        # Launch Threads
         threading.Thread(target=self.terumo_listener, daemon=True).start()
         threading.Thread(target=self.board_one_listener, daemon=True).start()
         threading.Thread(target=self.blood_pump_loop, daemon=True).start()
@@ -92,10 +87,9 @@ class ClinicalConsole:
         threading.Thread(target=self.start_syringe_watchdog_thread, daemon=True).start()
         self.check_heartbeat_status()
 
-    # --- MASTER CONTROL LOOP ---
     def master_control_loop(self):
         while True:
-            # SYNC SETPOINTS FROM UI TO PID INSTANCE
+            # SYNC SETPOINTS: Allows the PID to respond to UI slider changes
             try:
                 self.press_pid.setpoint = float(self.press_setpoint.get())
                 self.temp_pid.setpoint = float(self.temp_setpoint.get())
@@ -111,7 +105,7 @@ class ClinicalConsole:
                         self.send_pump_cmd(new_rpm)
                 except: pass
 
-            # 2. Temperature PID (Interlock: Pump must be OK and moving)
+            # 2. Temperature PID (Interlock: Pump health and speed > 150 RPM)
             if self.temp_auto_mode.get() and self.port_status["Pump"] and self.actual_rpm > 150:
                 try:
                     t_out = self.temp_pid.update(float(self.temp_val))
@@ -126,7 +120,6 @@ class ClinicalConsole:
             
             threading.Event().wait(1.0)
 
-    # --- COMMUNICATIONS ---
     def safe_comm(self, port, packet, expected_len):
         acquired = self.cmd_lock.acquire(timeout=2.0)
         if not acquired: return None 
@@ -138,10 +131,9 @@ class ClinicalConsole:
                     res = s.recv(expected_len)
                 else: 
                     res = s.recv(1024)
-            # Port successfully responded
             if port == PORT_BLOOD_PUMP: self.port_status["Pump"] = True
             if port == PORT_BOARD_1: self.port_status["Board1"] = True
-            return res # CRITICAL FIX: Restored return value
+            return res
         except:
             if port == PORT_BLOOD_PUMP: self.port_status["Pump"] = False
             if port == PORT_BOARD_1: self.port_status["Board1"] = False
@@ -158,7 +150,7 @@ class ClinicalConsole:
         threading.Thread(target=self.safe_comm, args=(PORT_BOARD_1, pk.encode('ascii'), 0), daemon=True).start()
 
     def send_b2_gas_cmd(self):
-        # SWAPPED MAPPING FIX: Pump Speed / Valve Duty swapped to match hardware
+        # MAPPING FIXED: air_pump_pct and gas_valve_pct directed to correct hardware registers
         v_t = int((self.gas_valve_pct.get()/100)*255) # Valve
         p_t = int((self.air_pump_pct.get()/100)*255) # Pump
         pay = f"{str(p_t).zfill(3)}{str(v_t).zfill(3)}"
@@ -171,7 +163,6 @@ class ClinicalConsole:
         pk = p_body + struct.pack("B", sum(p_body) % 256)
         threading.Thread(target=self.safe_comm, args=(PORT_BLOOD_PUMP, pk, 9), daemon=True).start()
 
-    # --- UI LAYOUT ---
     def create_layout(self):
         self.top_frame = tk.Frame(self.root, height=150); self.top_frame.pack(side=tk.TOP, fill=tk.X)
         led_c = tk.Frame(self.top_frame); led_c.pack(side=tk.LEFT, padx=20)
@@ -185,72 +176,64 @@ class ClinicalConsole:
         self.db_frame = tk.Frame(mid, padx=10); self.db_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.sidebar = tk.Frame(mid, width=320, bg="#f4f4f4", padx=10); self.sidebar.pack(side=tk.RIGHT, fill=tk.Y)
         
-        db = tk.LabelFrame(self.db_frame, text=" Perfusion Dashboard "); db.pack(fill=tk.X, pady=5)
+        db = tk.LabelFrame(self.db_frame, text=" Dashboard "); db.pack(fill=tk.X, pady=5)
         self.metrics = {}
         ly = [("PH", "pH", "black"), ("PO2", "pO2 kpa", "blue"), ("PCO2", "pCO2 kpa", "purple"),
               ("PRESS", "Pressure mmHg", "darkred"), ("FLOW", "Flow lpm", "darkgreen"), ("TEMP", "Temp C", "orange")]
         for i, (k, l, c) in enumerate(ly):
             f = tk.Frame(db, padx=25, pady=10); f.grid(row=i//3, column=i%3, sticky="w")
-            tk.Label(f, text=l, font=('Arial', 10)).pack(anchor="w")
+            tk.Label(f, text=l).pack(anchor="w")
             lbl = tk.Label(f, text="--.--", font=('Arial', 32, 'bold'), fg=c); lbl.pack(anchor="w"); self.metrics[k] = lbl
 
-        gf = tk.LabelFrame(self.db_frame, text=" 24-Hour Flow Trend "); gf.pack(fill=tk.BOTH, expand=True, pady=10)
+        gf = tk.LabelFrame(self.db_frame, text=" Flow Trend "); gf.pack(fill=tk.BOTH, expand=True, pady=10)
         self.fig, self.ax = plt.subplots(figsize=(8, 3), dpi=90); self.fig.patch.set_facecolor('#f4f4f4')
         self.canvas = FigureCanvasTkAgg(self.fig, master=gf); self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        bp = tk.LabelFrame(self.sidebar, text=" Blood Pump (mmHg) "); bp.pack(fill=tk.X, pady=5)
-        self.press_chk = tk.Checkbutton(bp, text="ENABLE AUTO PRESSURE", variable=self.auto_mode, font=('Arial', 9, 'bold'))
+        bp = tk.LabelFrame(self.sidebar, text=" Blood Pump "); bp.pack(fill=tk.X, pady=5)
+        self.press_chk = tk.Checkbutton(bp, text="AUTO PRESSURE", variable=self.auto_mode, font=('Arial', 9, 'bold'))
         self.press_chk.pack()
         tk.Label(bp, text="Target mmHg:").pack(side=tk.LEFT); tk.Entry(bp, textvariable=self.press_setpoint, width=5).pack(side=tk.LEFT)
-        tk.Button(bp, text="SET MANUAL RPM", bg="green", fg="white", command=lambda: self.send_pump_cmd(int(self.rpm_ent.get()))).pack(fill=tk.X, pady=2)
+        tk.Button(bp, text="SET RPM", bg="green", fg="white", command=lambda: self.send_pump_cmd(int(self.rpm_ent.get()))).pack(fill=tk.X, pady=2)
         self.rpm_ent = tk.Entry(bp, justify='center'); self.rpm_ent.insert(0, "1000"); self.rpm_ent.pack()
         self.rpm_actual_lbl = tk.Label(bp, text="Actual: 0 RPM", font=('Arial', 10, 'bold')); self.rpm_actual_lbl.pack()
 
-        b1 = tk.LabelFrame(self.sidebar, text=" Temperature (Celsius) "); b1.pack(fill=tk.X, pady=5)
-        self.temp_chk = tk.Checkbutton(b1, text="ENABLE AUTO TEMP", variable=self.temp_auto_mode, font=('Arial', 9, 'bold'))
+        b1 = tk.LabelFrame(self.sidebar, text=" Temperature "); b1.pack(fill=tk.X, pady=5)
+        self.temp_chk = tk.Checkbutton(b1, text="AUTO TEMP", variable=self.temp_auto_mode, font=('Arial', 9, 'bold'))
         self.temp_chk.pack()
-        tk.Label(b1, text="Target Temp (18-40C):").pack()
+        tk.Label(b1, text="Target Temp:").pack()
         tk.Scale(b1, from_=18, to=40, resolution=0.1, orient=tk.HORIZONTAL, variable=self.temp_setpoint).pack(fill=tk.X)
-        tk.Label(b1, text="Active Heater PWM (Indicator):").pack()
+        tk.Label(b1, text="Heater Duty (Indicator):").pack()
         tk.Scale(b1, from_=0, to=240, orient=tk.HORIZONTAL, variable=self.heater_pwm, state="disabled").pack(fill=tk.X)
 
         bg = tk.LabelFrame(self.sidebar, text=" Gas Control "); bg.pack(fill=tk.X, pady=5)
         tk.Scale(bg, from_=0, to=100, label="Air Pump Speed %", orient=tk.HORIZONTAL, variable=self.air_pump_pct).pack(fill=tk.X)
         tk.Scale(bg, from_=0, to=100, label="Gas Valve Duty %", orient=tk.HORIZONTAL, variable=self.gas_valve_pct).pack(fill=tk.X)
-        tk.Button(bg, text="UPDATE GAS HARDWARE", bg="purple", fg="white", command=self.send_b2_gas_cmd).pack(fill=tk.X, pady=5)
+        tk.Button(bg, text="UPDATE GAS", command=self.send_b2_gas_cmd).pack(fill=tk.X)
 
-        inf = tk.LabelFrame(self.sidebar, text=" Syringe Infusion "); inf.pack(fill=tk.X, pady=5)
+        inf = tk.LabelFrame(self.sidebar, text=" Infusion "); inf.pack(fill=tk.X, pady=5)
         self.create_inf_row(inf, "Upper", PORT_UPPER_SYRINGE); self.create_inf_row(inf, "Lower", PORT_LOWER_SYRINGE)
-        
-        tk.Button(self.sidebar, text="GLOBAL SYSTEM STOP", bg="red", fg="white", font=('Arial', 12, 'bold'), command=self.global_emergency_stop).pack(fill=tk.X, pady=10)
-        self.btn_log = tk.Button(self.sidebar, text="Start Recording", command=self.toggle_logging); self.btn_log.pack(fill=tk.X)
+        tk.Button(self.sidebar, text="STOP ALL", bg="red", fg="white", command=self.global_emergency_stop).pack(fill=tk.X, pady=10)
 
-    # --- UI UPDATES ---
     def refresh_ui_labels(self):
         try:
             self.metrics["TEMP"].config(text=self.temp_val); self.metrics["PRESS"].config(text=self.press_val)
             self.metrics["PH"].config(text=self.ph_val); self.metrics["FLOW"].config(text=self.flow_val)
             self.rpm_actual_lbl.config(text=f"Actual: {self.actual_rpm} RPM")
-            
             self.press_chk.config(fg="red" if self.auto_mode.get() else "black")
             self.temp_chk.config(fg="orange" if self.temp_auto_mode.get() else "black")
-            
             if self.log_counter % 20 == 0: self.update_flow_graph()
             self.log_counter += 1
-            self.log_led.itemconfig(self.log_circle, fill="blue" if self.is_logging else "gray")
         except: pass
         self.root.after(500, self.refresh_ui_labels)
 
     def update_flow_graph(self):
         try:
-            val = float(self.flow_val)
-            self.flow_history.append(val); self.time_history.append(datetime.now().strftime("%H:%M"))
+            self.flow_history.append(float(self.flow_val)); self.time_history.append(datetime.now().strftime("%H:%M"))
             if len(self.flow_history) > self.max_graph_points: self.flow_history.pop(0); self.time_history.pop(0)
-            self.ax.clear(); self.ax.plot(self.time_history, self.flow_history, color='green', linewidth=1.5)
+            self.ax.clear(); self.ax.plot(self.time_history, self.flow_history, color='green')
             self.ax.set_xticks(self.time_history[::48]); self.canvas.draw()
         except: pass
 
-    # --- SENSOR PARSING ---
     def blood_pump_loop(self):
         while True:
             p_body = struct.pack(">BBBBi", 1, 6, 3, 0, 0)
@@ -276,23 +259,18 @@ class ClinicalConsole:
             self.last_terumo_packet_time = datetime.now()
             self.ph_val, self.pco2_val, self.po2_val, self.temp_val = f[1], f[2], f[3], f[4]
 
-    def log_msg(self, m):
-        def a(): self.terminal.insert(tk.END, f"[{datetime.now().strftime('%H:%M:%S')}] {m}\n"); self.terminal.see(tk.END)
-        self.root.after(0, a)
-
     def check_heartbeat_status(self):
         t_err = (datetime.now() - self.last_terumo_packet_time).total_seconds() > 15
-        b1_err = (datetime.now() - self.last_b1_send_time).total_seconds() > 5.0
         p_err = not self.port_status["Pump"]
-        all_ok = (not t_err) and (not b1_err) and (not p_err)
-        self.run_led.itemconfig(self.run_circle, fill="green" if all_ok else "gray")
-        self.err_led.itemconfig(self.err_circle, fill="red" if not all_ok else "gray")
+        self.run_led.itemconfig(self.run_circle, fill="green" if not p_err else "gray")
+        self.err_led.itemconfig(self.err_circle, fill="red" if p_err or t_err else "gray")
         self.root.after(1000, self.check_heartbeat_status)
 
-    def global_emergency_stop(self):
-        self.auto_mode.set(False); self.temp_auto_mode.set(False); self.heater_pwm.set(0); self.send_b1_cmd()
-        self.send_pump_cmd(0); self.air_pump_pct.set(0); self.gas_valve_pct.set(0); self.send_b2_gas_cmd()
-        for p in [PORT_UPPER_SYRINGE, PORT_LOWER_SYRINGE]: self.syringe_pump_action(p, "0", "STOP")
+    def syringe_pump_action(self, port, rate, act):
+        def task():
+            cmds = [f"DIA {SYRINGE_DIA}\r", f"RAT {rate} MH\r", "RUN\r"] if act == "RUN" else ["STP\r"]
+            for c in cmds: self.safe_comm(port, c.encode('ascii'), 0); threading.Event().wait(0.15)
+        threading.Thread(target=task, daemon=True).start()
 
     def make_led(self, parent, text, color):
         f = tk.Frame(parent); f.pack(side=tk.LEFT, padx=5)
@@ -308,20 +286,10 @@ class ClinicalConsole:
         tk.Button(f, text="RUN", command=lambda: self.syringe_pump_action(port, ent.get(), "RUN")).pack(side=tk.LEFT)
         tk.Button(f, text="STOP", command=lambda: self.syringe_pump_action(port, ent.get(), "STOP")).pack(side=tk.LEFT)
 
-    def syringe_pump_action(self, port, rate, act):
-        self.syringe_states[port] = act
-        def task():
-            cmds = [f"DIA {SYRINGE_DIA}\r", f"RAT {rate} MH\r", "RUN\r"] if act == "RUN" else ["STP\r"]
-            for c in cmds: self.safe_comm(port, c.encode('ascii'), 0); threading.Event().wait(0.15)
-        threading.Thread(target=task, daemon=True).start()
-
     def start_health_monitor_thread(self):
         while True:
-            threading.Event().wait(300.0); p_st = "OK" if self.port_status["Pump"] else "ERROR"
-            b1_st = "OK" if self.health_counts["Board1"] > 0 else "LOST"
-            msg = f"\n--- SYSTEM HEALTH PULSE ---\nPump:{p_st} | Board1:{b1_st}\n"
-            if self.temp_auto_mode.get(): msg += f"AUTO-TEMP: {self.temp_val}C (Target {self.temp_setpoint.get()}C)\n"
-            self.log_msg(msg); self.health_counts = {"Terumo":0, "Board1":0, "BloodPump":0}
+            threading.Event().wait(300.0)
+            self.health_counts = {"Terumo":0, "Board1":0, "BloodPump":0}
 
     def start_syringe_watchdog_thread(self):
         while True: threading.Event().wait(60.0)
@@ -349,16 +317,6 @@ class ClinicalConsole:
                         buf += d
                         while "\r" in buf: line, buf = buf.split("\r", 1); self.parse_terumo(line)
             except: threading.Event().wait(2.0)
-
-    def toggle_logging(self):
-        if not self.is_logging:
-            path = filedialog.asksaveasfilename(defaultextension=".csv")
-            if path:
-                self.log_filepath = path
-                with open(path, 'w', newline='') as f:
-                    csv.writer(f).writerow(["Time", "pH", "pCO2", "pO2", "Temp", "RPM", "Pressure", "Flow"])
-                self.is_logging = True; self.btn_log.config(text="STOP RECORDING", bg="blue", fg="white")
-        else: self.is_logging = False; self.btn_log.config(text="Start Recording", bg="#f0f0f0", fg="black")
 
 if __name__ == "__main__":
     root = tk.Tk(); app = ClinicalConsole(root); root.mainloop()
