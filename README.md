@@ -1,4 +1,4 @@
-# Kidney Perfusion Control System v3.2.1
+# Kidney Perfusion Control System v3.3.0
 
 A high-resilience clinical console for ex-vivo kidney perfusion, running on Raspberry Pi 5.
 Includes PID controllers for perfusate temperature and arterial pressure with user selectable
@@ -18,6 +18,7 @@ targets.
 - **24-Hour Trend:** Real-time Matplotlib visualization of Flow variance.
 - **1Hz Logging:** Synchronized disk writing for precise clinical audit.
 - **Watchdog:** Active 60s monitoring and recovery of infusion pumps.
+- **PID controllers:** PID controllers for pressure and temperature
 
 ## Installation
 1. Ensure `python3-tk` and `python3-matplotlib` are installed.
