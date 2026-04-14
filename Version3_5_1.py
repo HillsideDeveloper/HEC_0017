@@ -1,4 +1,4 @@
-# --- VERSION 3.5.0 ---
+# --- VERSION 3.5.1 ---
 # 1. FIXED: Added setpoint synchronization for Temperature PID in the master loop.
 # 2. FIXED: Swapped Air Pump and Gas Valve variable mapping to match hardware wiring. DV Changed 14/04/26
 # 3. SAFETY: Heater interlock forces 0 PWM if Pump fails or RPM < 150.
@@ -44,7 +44,7 @@ class PID:
 class ClinicalConsole:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kidney Device Console v3.5.0")
+        self.root.title("Kidney Device Console v3.5.1")
         self.root.geometry("1450x980")
         
         # --- UI Data State ---
@@ -310,48 +310,61 @@ class ClinicalConsole:
         tk.Button(f, text="STOP", command=lambda: self.syringe_pump_action(port, ent.get(), "STOP")).pack(side=tk.LEFT)
 
     def syringe_pump_action(self, port, rate, act):
+        # State tracking for watchdog and recovery
+        self.syringe_states[port] = act
+        self.syringe_rates[port] = rate
+        
         def task():
-            cmds = [f"DIA {SYRINGE_DIA}\r", f"RAT {rate} MH\r", "RUN\r"] if act == "RUN" else ["STP\r"]
-            for c in cmds: self.safe_comm(port, c.encode('ascii'), 0); threading.Event().wait(0.15)
+            # Standard command sequence for syringe drivers
+            cmds = [f"DIA {SYRINGE_DIA}\r", f"RAT {rate} MH\r", "CLD INF\r", "CLT\r", "DIR INF\r", "RUN\r"] if act == "RUN" else ["STP\r"]
+            for c in cmds: 
+                self.safe_comm(port, c.encode('ascii'), 0)
+                threading.Event().wait(0.15)
+        
         threading.Thread(target=task, daemon=True).start()
 
-        def start_health_monitor_thread(self):
-            while True:
-                threading.Event().wait(300.0)
+    def start_health_monitor_thread(self):
+        while True:
+              threading.Event().wait(300.0)
             
-                # Determine connection status for terminal report
-                p_st = "OK" if self.port_status["Pump"] else "ERROR"
-                b1_st = "OK" if self.health_counts["Board1"] > 0 else "LOST"
-                t_st = "OK" if self.health_counts["Terumo"] > 0 else "LOST"
+            # Determine connection status for terminal report
+            p_st = "OK" if self.port_status["Pump"] else "ERROR"
+            b1_st = "OK" if self.health_counts["Board1"] > 0 else "LOST"
+            t_st = "OK" if self.health_counts["Terumo"] > 0 else "LOST"
             
-                # Construct diagnostic message
-                msg = f"\n--- 5-MINUTE HEALTH PULSE ---\n"
-                msg += f"CONN: Pump:{p_st} | Board1:{b1_st} | Terumo:{t_st}\n"
+            # Construct diagnostic message
+            msg = f"\n--- 5-MINUTE HEALTH PULSE ---\n"
+            msg += f"CONN: Pump:{p_st} | Board1:{b1_st} | Terumo:{t_st}\n"
             
                 # Report PID performance if active
-                if self.temp_auto_mode.get():
-                    msg += f"TEMP PID: Target:{self.temp_setpoint.get()}C | Actual:{self.temp_val}C | PWM:{self.heater_pwm.get()}\n"
-                if self.auto_mode.get():
-                    msg += f"PRESS PID: Target:{self.press_setpoint.get()}mmHg | Actual:{self.press_val}mmHg | RPM:{self.actual_rpm}\n"
+            if self.temp_auto_mode.get():
+                msg += f"TEMP PID: Target:{self.temp_setpoint.get()}C | Actual:{self.temp_val}C | PWM:{self.heater_pwm.get()}\n"
+            if self.auto_mode.get():
+                msg += f"PRESS PID: Target:{self.press_setpoint.get()}mmHg | Actual:{self.press_val}mmHg | RPM:{self.actual_rpm}\n"
             
-                # Send to UI Terminal
-                self.log_msg(msg)
+            # Send to UI Terminal
+            self.log_msg(msg)
             
-                # Reset counters for next 5-minute window
-                self.health_counts = {"Terumo":0, "Board1":0, "BloodPump":0}
+            # Reset counters for next 5-minute window
+            self.health_counts = {"Terumo":0, "Board1":0, "BloodPump":0}
 
     def start_syringe_watchdog_thread(self):
-       while True:
-            threading.Event().wait(60.0)
-            # Logic to check if running syringes have stalled
+        while True:
+            threading.Event().wait(60.0)  # Check every minute
             for port, state in self.syringe_states.items():
                 if state == "RUN":
-                    try:
-                        reply = self.safe_comm(port, b"\r", 0)
-                        if reply and b"S" in reply: # 'S' indicates stopped
-                            self.log_msg(f"Watchdog: Restarting Syringe on Port {port}")
-                            self.syringe_pump_action(port, "5.0", "RUN")
-                    except: pass
+                    self.check_recov(port)
+
+    def check_recov(self, port):
+        """Restored helper to verify pump status and trigger recovery."""
+        try:
+            # Query pump status
+            reply = self.safe_comm(port, b"\r", 0)
+            if reply and b"S" in reply:  # 'S' indicates the pump has stopped
+                self.log_msg(f"Watchdog: Unexpected stop detected. Restarting Syringe on Port {port}")
+                self.syringe_pump_action(port, self.syringe_rates[port], "RUN")
+        except:
+            pass
 
     def board_one_listener(self):
         while True:
