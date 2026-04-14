@@ -325,7 +325,7 @@ class ClinicalConsole:
 
     def start_health_monitor_thread(self):
         while True:
-              threading.Event().wait(300.0)
+            threading.Event().wait(300.0)
             
             # Determine connection status for terminal report
             p_st = "OK" if self.port_status["Pump"] else "ERROR"
