@@ -1,6 +1,6 @@
-# --- VERSION 3.4.4 ---
+# --- VERSION 3.4.5 ---
 # 1. FIXED: Added setpoint synchronization for Temperature PID in the master loop.
-# 2. FIXED: Swapped Air Pump and Gas Valve variable mapping to match hardware wiring.
+# 2. FIXED: Swapped Air Pump and Gas Valve variable mapping to match hardware wiring. DV Changed 14/04/26
 # 3. SAFETY: Heater interlock forces 0 PWM if Pump fails or RPM < 150.
 # 4. TUNING: Thermal Anti-windup limit maintained at 1500.
 # 5. UI: Manual heater overrides removed; PWM scale is now a read-only indicator.
@@ -44,7 +44,7 @@ class PID:
 class ClinicalConsole:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kidney Device Console v3.4.4")
+        self.root.title("Kidney Device Console v3.4.5")
         self.root.geometry("1450x980")
         
         # --- UI Data State ---
@@ -160,7 +160,8 @@ class ClinicalConsole:
         # Swapped Mapping: Valve slider -> Valve hardware | Pump slider -> Pump hardware
         v_t = int((self.gas_valve_pct.get()/100)*255) # Valve
         p_t = int((self.air_pump_pct.get()/100)*255) # Pump
-        pay = f"{str(p_t).zfill(3)}{str(v_t).zfill(3)}"
+       # pay = f"{str(p_t).zfill(3)}{str(v_t).zfill(3)}"  DV 14/04/26
+        pay = f"{str(v_t).zfill(3)}{str(p_t).zfill(3)}"
         cs = (sum(ord(c) for c in pay) & 0xFF) ^ 0xFF
         pk = f"{pay}{str(cs).zfill(3)}\r"
         threading.Thread(target=self.safe_comm, args=(PORT_BOARD_2, pk.encode('ascii'), 20), daemon=True).start()
