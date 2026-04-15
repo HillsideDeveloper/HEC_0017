@@ -1,4 +1,4 @@
-# --- VERSION 3.5.2 ---
+# --- VERSION 3.5.4 ---
 # 1. FIXED: Added setpoint synchronization for Temperature PID in the master loop.
 # 2. FIXED: Swapped Air Pump and Gas Valve variable mapping to match hardware wiring. DV Changed 14/04/26
 # 3. SAFETY: Heater interlock forces 0 PWM if Pump fails or RPM < 150.
@@ -46,7 +46,7 @@ class PID:
 class ClinicalConsole:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kidney Device Console v3.5.3")
+        self.root.title("Kidney Device Console v3.5.4")
         self.root.geometry("1450x980")
         
         # --- UI Data State ---
@@ -263,12 +263,10 @@ class ClinicalConsole:
         stall_counter = 0
         while True:
             try:
-                # Thread Safety: Exit if the UI window has been closed
-                if not self.root.winfo_exists(): 
-                    break 
+                if not self.root.winfo_exists(): break 
                 
-                # --- 1. RPM & STALL CHECK ---
-                p_body = struct.pack(">BBBBi", 1, 6, 3, 0, 0) # GAP 3: Actual Speed
+                # 1. Fetch Actual RPM
+                p_body = struct.pack(">BBBBi", 1, 6, 3, 0, 0)
                 pk = p_body + struct.pack("B", sum(p_body) % 256)
                 reply = self.safe_comm(PORT_BLOOD_PUMP, pk, 9)
                 
@@ -276,11 +274,12 @@ class ClinicalConsole:
                     self.actual_rpm = abs(struct.unpack(">i", reply[4:8])[0])
                     self.health_counts["BloodPump"] += 1
                     
-                    # Target check: uses manual entry or PID setpoint
-                    target = int(self.rpm_ent.get()) if not self.auto_mode.get() else self.press_pid.setpoint
+                    # --- NEW STALL LOGIC ---
+                    # We check: Is the pump "Active" AND is the motor NOT moving?
+                    # We define 'Active' as either a manual RPM set OR the Auto Mode being ON
+                    is_commanded = self.pump_active or self.auto_mode.get()
                     
-                    # Only count stall if we are actively commanding the pump
-                    if self.pump_active and target > 100 and self.actual_rpm < 10:
+                    if is_commanded and self.actual_rpm < 10:
                         stall_counter += 0.5 
                     else:
                         stall_counter = 0
@@ -288,29 +287,26 @@ class ClinicalConsole:
 
                     if stall_counter >= 10.0:
                         self.motor_stalled = True
-                        self.log_msg("CRITICAL: Motor Stall Detected (10s)! Emergency Stop.")
+                        # Force a hard stop to save the motor windings
+                        self.send_pump_cmd(0) 
+                        self.log_msg("CRITICAL: Motor Stall Detected! Current cut to protect bearings.")
                         self.global_emergency_stop()
                         stall_counter = 0
 
-                # --- 2. THERMAL CHECK (VITAL) ---
-                # GAP 132: Check for Thermal Warning
+                # --- 2. THERMAL CHECK ---
                 t_body = struct.pack(">BBBBi", 1, 6, 132, 0, 0)
-                t_pk = t_body + struct.pack("B", sum(t_body) % 256)
-                t_reply = self.safe_comm(PORT_BLOOD_PUMP, t_pk, 9)
-
+                t_reply = self.safe_comm(PORT_BLOOD_PUMP, t_body + struct.pack("B", sum(t_body)%256), 9)
                 if t_reply and len(t_reply) == 9:
-                    thermal_flag = struct.unpack(">i", t_reply[4:8])[0]
-                    if thermal_flag == 1:
-                        if not self.motor_overheat: # Log once per event
-                            self.log_msg("WARNING: TMCM-163 Thermal Limit Reached (>100C)!")
+                    thermal_val = struct.unpack(">i", t_reply[4:8])[0]
+                    if thermal_val == 1:
+                        if not self.motor_overheat:
+                            self.log_msg("WARNING: TMCM-163 Overtemperature Detected!")
                         self.motor_overheat = True
                     else:
                         self.motor_overheat = False
 
             except (tk.TclError, RuntimeError, AttributeError):
-                # Graceful exit if UI elements are destroyed
                 break
-                
             threading.Event().wait(0.5)
 
     def parse_board_one(self, l):
