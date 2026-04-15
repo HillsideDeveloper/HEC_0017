@@ -1,9 +1,10 @@
-# --- VERSION 3.5.1 ---
+# --- VERSION 3.5.2 ---
 # 1. FIXED: Added setpoint synchronization for Temperature PID in the master loop.
 # 2. FIXED: Swapped Air Pump and Gas Valve variable mapping to match hardware wiring. DV Changed 14/04/26
 # 3. SAFETY: Heater interlock forces 0 PWM if Pump fails or RPM < 150.
 # 4. TUNING: Thermal Anti-windup limit maintained at 1500.
 # 5. UI: Manual heater overrides removed; PWM scale is now a read-only indicator.
+# 6. Now checking for motor stall or Drive Over Temperature Flag and adding safety features.
 
 import tkinter as tk
 from tkinter import scrolledtext, filedialog, messagebox
@@ -44,7 +45,7 @@ class PID:
 class ClinicalConsole:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kidney Device Console v3.5.1")
+        self.root.title("Kidney Device Console v3.5.2")
         self.root.geometry("1450x980")
         
         # --- UI Data State ---
@@ -55,6 +56,8 @@ class ClinicalConsole:
         # Health Tracking Flags
         self.port_status = {"Pump": True, "Terumo": True, "Board1": True}
         self.health_counts = {"Terumo": 0, "Board1": 0, "BloodPump": 0}
+        self.motor_stalled = False
+        self.motor_overheat = False
         
         # PID Controllers
         self.auto_mode = tk.BooleanVar(value=False)
@@ -253,13 +256,47 @@ class ClinicalConsole:
 
     # --- HELPERS ---
     def blood_pump_loop(self):
+        stall_counter = 0
         while True:
-            p_body = struct.pack(">BBBBi", 1, 6, 3, 0, 0)
+            # --- 1. RPM & STALL CHECK ---
+            p_body = struct.pack(">BBBBi", 1, 6, 3, 0, 0) # GAP 3: Actual Speed
             pk = p_body + struct.pack("B", sum(p_body) % 256)
             reply = self.safe_comm(PORT_BLOOD_PUMP, pk, 9)
+            
             if reply and len(reply) == 9: 
                 self.actual_rpm = abs(struct.unpack(">i", reply[4:8])[0])
                 self.health_counts["BloodPump"] += 1
+                
+                # Check if we are trying to run (>100 RPM target) but stalled at 0
+                target = int(self.rpm_ent.get()) if not self.auto_mode.get() else self.press_pid.setpoint
+                if target > 100 and self.actual_rpm < 10:
+                    stall_counter += 0.5 
+                else:
+                    stall_counter = 0
+                    self.motor_stalled = False
+
+                if stall_counter >= 10.0:
+                    self.motor_stalled = True
+                    self.log_msg("CRITICAL: Motor Stall Detected (10s)! Emergency Stop Issued.")
+                    self.global_emergency_stop()
+                    stall_counter = 0
+
+            # --- 2. THERMAL CHECK (Axis Parameter 132) ---
+            # Command: GAP 132, Type 0, Motor 0
+            t_body = struct.pack(">BBBBi", 1, 6, 132, 0, 0)
+            t_pk = t_body + struct.pack("B", sum(t_body) % 256)
+            t_reply = self.safe_comm(PORT_BLOOD_PUMP, t_pk, 9)
+
+            if t_reply and len(t_reply) == 9:
+                # Value is in bytes [4:8]. 1 = Overheat Warning
+                thermal_flag = struct.unpack(">i", t_reply[4:8])[0]
+                if thermal_flag == 1:
+                    if not self.motor_overheat: # Only log once per event
+                        self.log_msg("WARNING: TMCM-163 Thermal Limit Reached (>100C)!")
+                    self.motor_overheat = True
+                else:
+                    self.motor_overheat = False
+
             threading.Event().wait(0.5)
 
     def parse_board_one(self, l):
@@ -285,9 +322,14 @@ class ClinicalConsole:
         t_err = (datetime.now() - self.last_terumo_packet_time).total_seconds() > 15
         b1_err = (datetime.now() - self.last_b1_send_time).total_seconds() > 5.0
         p_err = not self.port_status["Pump"]
-        all_ok = (not t_err) and (not b1_err) and (not p_err)
+        
+        # Aggregate logic for the Error Indicator
+        has_error = t_err or b1_err or p_err or self.motor_stalled or self.motor_overheat
+        all_ok = (not t_err) and (not b1_err) and (not p_err) and (not self.motor_stalled)
+        
         self.run_led.itemconfig(self.run_circle, fill="green" if all_ok else "gray")
-        self.err_led.itemconfig(self.err_circle, fill="red" if p_err or t_err else "gray")
+        self.err_led.itemconfig(self.err_circle, fill="red" if has_error else "gray")
+        
         self.root.after(1000, self.check_heartbeat_status)
 
     def global_emergency_stop(self):
