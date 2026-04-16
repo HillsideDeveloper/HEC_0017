@@ -1,4 +1,4 @@
-# --- VERSION 3.6.0 ---
+# --- VERSION 3.6.1 ---
 # 1. FIXED: Added setpoint synchronization for Temperature PID in the master loop.
 # 2. FIXED: Swapped Air Pump and Gas Valve variable mapping to match hardware wiring. DV Changed 14/04/26
 # 3. SAFETY: Heater interlock forces 0 PWM if Pump fails or RPM < 150.
@@ -47,7 +47,7 @@ class PID:
 class ClinicalConsole:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kidney Device Console v3.6.0")
+        self.root.title("Kidney Device Console v3.6.1")
         self.root.geometry("1450x980")
         
         # --- UI Data State ---
@@ -390,7 +390,7 @@ class ClinicalConsole:
         # 4. Reset other peripherals
         self.air_pump_pct.set(0); self.gas_valve_pct.set(0); self.send_b2_gas_cmd()
         for p in [PORT_UPPER_SYRINGE, PORT_LOWER_SYRINGE]:
-            self.syringe_pump_action(p, \"0\", \"STOP\")
+            self.syringe_pump_action(p, "0", "STOP")
         
         self.log_msg("GLOBAL STOP: All actuators de-energized.")
         
