@@ -46,7 +46,7 @@ class PID:
 class ClinicalConsole:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kidney Device Console v3.5.4")
+        self.root.title("Kidney Device Console v3.5.5")
         self.root.geometry("1450x980")
         
         # --- UI Data State ---
@@ -60,6 +60,7 @@ class ClinicalConsole:
         self.motor_stalled = False
         self.motor_overheat = False
         self.pump_active = False # New flag to prevent idle stall warnings
+        self.last_b1_receive_time = datetime.now() # track actual data arrival
         
         # PID Controllers
         self.auto_mode = tk.BooleanVar(value=False)
@@ -312,6 +313,7 @@ class ClinicalConsole:
     def parse_board_one(self, l):
         if "A," in l:
             self.health_counts["Board1"] += 1
+            self.last_b1_receive_time = datetime.now() # Update on successful receive
             try:
                 p = l.split(',')
                 self.press_val, self.flow_val = f"{float(p[4]):.2f}", f"{float(p[6]):.2f}"
@@ -329,13 +331,15 @@ class ClinicalConsole:
         self.root.after(0, a)
 
     def check_heartbeat_status(self):
-        if not self.root.winfo_exists(): return # Stop if window is closed
+        if not self.root.winfo_exists(): return 
+        
+        # Now checks if we haven't RECEIVED data for 5 seconds
         t_err = (datetime.now() - self.last_terumo_packet_time).total_seconds() > 15
-        b1_err = (datetime.now() - self.last_b1_send_time).total_seconds() > 5.0
+        b1_err = (datetime.now() - self.last_b1_receive_time).total_seconds() > 5.0
         p_err = not self.port_status["Pump"]
         
-        # Aggregate logic for the Error Indicator
         has_error = t_err or b1_err or p_err or self.motor_stalled or self.motor_overheat
+        # Interlock logic: Running LED only green if we have live data from all sources
         all_ok = (not t_err) and (not b1_err) and (not p_err) and (not self.motor_stalled)
         
         self.run_led.itemconfig(self.run_circle, fill="green" if all_ok else "gray")
