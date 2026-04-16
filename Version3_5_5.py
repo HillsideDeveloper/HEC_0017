@@ -22,7 +22,7 @@ PORT_UPPER_SYRINGE = 9003
 PORT_LOWER_SYRINGE = 9004
 PORT_BOARD_2 = 9005 
 PORT_BOARD_1 = 9008 
-SYRINGE_DIA = "29.70" 
+SYRINGE_DIA = "21.69"  #Internal diameter of a bd plastic 30ml syringe 
 
 class PID:
     def __init__(self, kp, ki, kd, setpoint, output_limits=(None, None), windup_limit=500):
