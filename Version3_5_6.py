@@ -1,4 +1,4 @@
-# --- VERSION 3.5.4 ---
+# --- VERSION 3.5.6 ---
 # 1. FIXED: Added setpoint synchronization for Temperature PID in the master loop.
 # 2. FIXED: Swapped Air Pump and Gas Valve variable mapping to match hardware wiring. DV Changed 14/04/26
 # 3. SAFETY: Heater interlock forces 0 PWM if Pump fails or RPM < 150.
@@ -6,6 +6,7 @@
 # 5. UI: Manual heater overrides removed; PWM scale is now a read-only indicator.
 # 6. Now checking for motor stall or Drive Over Temperature Flag and adding safety features.
 # 7. Added some logic to supress pump errors when idle not stalled.
+# 8. Now includes stall recovery
 
 import tkinter as tk
 from tkinter import scrolledtext, filedialog, messagebox
@@ -46,7 +47,7 @@ class PID:
 class ClinicalConsole:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kidney Device Console v3.5.5")
+        self.root.title("Kidney Device Console v3.5.6")
         self.root.geometry("1450x980")
         
         # --- UI Data State ---
@@ -262,49 +263,61 @@ class ClinicalConsole:
     # --- HELPERS ---
     def blood_pump_loop(self):
         stall_counter = 0
+        recovery_attempted = False
+        
         while True:
             try:
                 if not self.root.winfo_exists(): break 
                 
-                # 1. Fetch Actual RPM
+                # 1. Fetch Actual RPM from TMCM-163
                 p_body = struct.pack(">BBBBi", 1, 6, 3, 0, 0)
-                pk = p_body + struct.pack("B", sum(p_body) % 256)
-                reply = self.safe_comm(PORT_BLOOD_PUMP, pk, 9)
+                reply = self.safe_comm(PORT_BLOOD_PUMP, p_body + struct.pack("B", sum(p_body)%256), 9)
                 
                 if reply and len(reply) == 9: 
                     self.actual_rpm = abs(struct.unpack(">i", reply[4:8])[0])
                     self.health_counts["BloodPump"] += 1
                     
-                    # --- NEW STALL LOGIC ---
-                    # We check: Is the pump "Active" AND is the motor NOT moving?
-                    # We define 'Active' as either a manual RPM set OR the Auto Mode being ON
-                    is_commanded = self.pump_active or self.auto_mode.get()
+                    # Determine current target for comparison
+                    target = int(self.rpm_ent.get()) if not self.auto_mode.get() else self.press_pid.setpoint
                     
-                    if is_commanded and self.actual_rpm < 10:
+                    # 2. Monitor for Stall
+                    # Condition: Command is active and target is high, but motor isn't spinning
+                    is_active = self.pump_active or self.auto_mode.get()
+                    if is_active and target > 100 and self.actual_rpm < 10:
                         stall_counter += 0.5 
                     else:
+                        # Reset if motor starts spinning or is turned off
                         stall_counter = 0
                         self.motor_stalled = False
+                        recovery_attempted = False 
 
+                    # 3. REVERSE NUDGE (Trigger at 4 seconds)
+                    if stall_counter == 4.0 and not recovery_attempted:
+                        self.log_msg("Stall detected. Attempting Reverse-Nudge Recovery...")
+                        
+                        # Command: ROL (Rotate Left) at speed 600
+                        # Instruction 2, Type 0, Motor 0, Value 600
+                        rev_pk = struct.pack(">BBBBi", 1, 2, 0, 0, 600)
+                        self.safe_comm(PORT_BLOOD_PUMP, rev_pk + struct.pack("B", sum(rev_pk)%256), 0)
+                        
+                        threading.Event().wait(0.4) # Brief nudge
+                        
+                        # Resume original forward command
+                        self.send_pump_cmd(target)
+                        recovery_attempted = True
+
+                    # 4. FINAL FAIL-SAFE (Trigger at 10 seconds)
                     if stall_counter >= 10.0:
                         self.motor_stalled = True
-                        # Force a hard stop to save the motor windings
-                        self.send_pump_cmd(0) 
-                        self.log_msg("CRITICAL: Motor Stall Detected! Current cut to protect bearings.")
+                        self.log_msg("CRITICAL: Stall Recovery Failed. Emergency Stop Issued.")
                         self.global_emergency_stop()
                         stall_counter = 0
 
-                # --- 2. THERMAL CHECK ---
+                # 5. DRIVE THERMAL CHECK (Axis Parameter 132)
                 t_body = struct.pack(">BBBBi", 1, 6, 132, 0, 0)
                 t_reply = self.safe_comm(PORT_BLOOD_PUMP, t_body + struct.pack("B", sum(t_body)%256), 9)
                 if t_reply and len(t_reply) == 9:
-                    thermal_val = struct.unpack(">i", t_reply[4:8])[0]
-                    if thermal_val == 1:
-                        if not self.motor_overheat:
-                            self.log_msg("WARNING: TMCM-163 Overtemperature Detected!")
-                        self.motor_overheat = True
-                    else:
-                        self.motor_overheat = False
+                    self.motor_overheat = True if struct.unpack(">i", t_reply[4:8])[0] == 1 else False
 
             except (tk.TclError, RuntimeError, AttributeError):
                 break
