@@ -1,4 +1,4 @@
-# --- VERSION 3.6.2 ---
+# --- VERSION 3.6.3 ---
 # 1. FIXED: Added setpoint synchronization for Temperature PID in the master loop.
 # 2. FIXED: Swapped Air Pump and Gas Valve variable mapping to match hardware wiring. DV Changed 14/04/26
 # 3. SAFETY: Heater interlock forces 0 PWM if Pump fails or RPM < 150.
@@ -47,7 +47,7 @@ class PID:
 class ClinicalConsole:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kidney Device Console v3.6.2")
+        self.root.title("Kidney Device Console v3.6.3")
         self.root.geometry("1450x980")
         
         # --- UI Data State ---
@@ -176,14 +176,13 @@ class ClinicalConsole:
         threading.Thread(target=self.safe_comm, args=(PORT_BOARD_2, pk.encode('ascii'), 20), daemon=True).start()
 
     def send_pump_cmd(self, rpm):
-        # Only block if we are in recovery AND the command is to move (>0)
-        if self.recovery_in_progress and rpm > 0:
+        # BLOCK ALL incoming commands if a recovery nudge or global stop is active
+        if self.recovery_in_progress:
             return 
             
         self.pump_active = True if rpm > 0 else False
         p_body = struct.pack(">BBBBi", 1, 1, 0, 0, rpm)
         pk = p_body + struct.pack("B", sum(p_body) % 256)
-        # Use a daemon thread to ensure UI doesn't hang on network lag
         threading.Thread(target=self.safe_comm, args=(PORT_BLOOD_PUMP, pk, 9), daemon=True).start()
 
     # --- UI LAYOUT ---
@@ -284,55 +283,46 @@ class ClinicalConsole:
                     self.actual_rpm = abs(struct.unpack(">i", reply[4:8])[0])
                     self.health_counts["BloodPump"] += 1
                     
-                    # Determine target
-                    try:
-                        target = int(self.rpm_ent.get()) if not self.auto_mode.get() else self.press_pid.setpoint
-                    except: target = 0
-
-                    # --- CRITICAL CHANGE ---
-                    # Logic: Only count a stall if we are INTENDING to run.
-                    # 'self.pump_active' is now set to False inside global_emergency_stop.
-                    should_be_running = (self.pump_active or self.auto_mode.get()) and target > 100
-
-                    if should_be_running and self.actual_rpm < 10:
+                    # 2. Refined "Should Be Running" Logic
+                    # Monitor stall if Manual is active OR Auto Mode is toggled ON
+                    is_user_requesting_run = self.pump_active or self.auto_mode.get()
+                    
+                    if is_user_requesting_run and self.actual_rpm < 10:
                         stall_counter += 0.5 
                     else:
-                        # Reset counter if the pump starts spinning OR if we hit Global Stop
                         stall_counter = 0
                         self.motor_stalled = False
                         recovery_attempted = False 
 
-                    # 2. REVERSE NUDGE (at 4 seconds)
+                    # 3. REVERSE NUDGE (Triggers at 4 seconds)
                     if stall_counter == 4.0 and not recovery_attempted and not self.recovery_in_progress:
-                        self.recovery_in_progress = True # PRIORITY LOCK ON
-                        self.log_msg("STALL DETECTED: Attempting Reverse-Nudge Recovery...")
+                        self.recovery_in_progress = True # SECURE THE BUS
+                        self.log_msg("STALL DETECTED (AUTO/MANUAL): Attempting Recovery...")
                         
-                        # Stop -> Nudge -> Resume
+                        # Step A: Immediate Stop to clear current
                         self.safe_comm(PORT_BLOOD_PUMP, struct.pack(">BBBBiB", 1, 3, 0, 0, 0, 4), 9)
-                        threading.Event().wait(0.3)
+                        threading.Event().wait(0.4)
                         
+                        # Step B: Stronger Reverse Nudge (ROL)
                         rev_pk = struct.pack(">BBBBi", 1, 2, 0, 0, 800)
                         self.safe_comm(PORT_BLOOD_PUMP, rev_pk + struct.pack("B", sum(rev_pk)%256), 9)
-                        threading.Event().wait(0.5)
+                        threading.Event().wait(0.6)
                         
-                        self.recovery_in_progress = False # PRIORITY LOCK OFF
-                        self.send_pump_cmd(int(target))
+                        # Step C: Re-fetch target and resume
+                        self.recovery_in_progress = False # RELEASE BUS
+                        try:
+                            target = int(self.rpm_ent.get()) if not self.auto_mode.get() else self.press_pid.setpoint
+                            self.send_pump_cmd(int(target))
+                        except: pass
                         recovery_attempted = True
 
-                    # 3. FINAL FAIL-SAFE (at 10 seconds)
+                    # 4. FINAL FAIL-SAFE
                     if stall_counter >= 10.0:
                         self.motor_stalled = True
-                        self.log_msg("CRITICAL: Stall Recovery Failed. Power Cut.")
+                        self.log_msg("CRITICAL: Auto-Mode Stall Recovery Failed. Emergency Stop.")
                         self.global_emergency_stop() 
                         stall_counter = 0
-
-                # --- Thermal Check ---
-                t_body = struct.pack(">BBBBi", 1, 6, 132, 0, 0)
-                t_reply = self.safe_comm(PORT_BLOOD_PUMP, t_body + struct.pack("B", sum(t_body)%256), 9)
-                if t_reply and len(t_reply) == 9:
-                    self.motor_overheat = True if struct.unpack(">i", t_reply[4:8])[0] == 1 else False
-
-            except (tk.TclError, RuntimeError, AttributeError): break
+            except: break
             threading.Event().wait(0.5)
 
     def parse_board_one(self, l):
@@ -372,7 +362,7 @@ class ClinicalConsole:
         
         self.root.after(1000, self.check_heartbeat_status)
 
-    ef global_emergency_stop(self):
+    def global_emergency_stop(self):
         # 1. PRIORITY LOCK: Stop all background pump loops immediately
         self.recovery_in_progress = True 
         self.pump_active = False  # Tells the stall logic we are now intended to be idle
