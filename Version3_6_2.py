@@ -1,4 +1,4 @@
-# --- VERSION 3.6.1 ---
+# --- VERSION 3.6.2 ---
 # 1. FIXED: Added setpoint synchronization for Temperature PID in the master loop.
 # 2. FIXED: Swapped Air Pump and Gas Valve variable mapping to match hardware wiring. DV Changed 14/04/26
 # 3. SAFETY: Heater interlock forces 0 PWM if Pump fails or RPM < 150.
@@ -47,7 +47,7 @@ class PID:
 class ClinicalConsole:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kidney Device Console v3.6.1")
+        self.root.title("Kidney Device Console v3.6.2")
         self.root.geometry("1450x980")
         
         # --- UI Data State ---
@@ -284,49 +284,49 @@ class ClinicalConsole:
                     self.actual_rpm = abs(struct.unpack(">i", reply[4:8])[0])
                     self.health_counts["BloodPump"] += 1
                     
-                    # Determine target (Manual Entry or PID Setpoint)
+                    # Determine target
                     try:
                         target = int(self.rpm_ent.get()) if not self.auto_mode.get() else self.press_pid.setpoint
                     except: target = 0
 
-                    is_active = self.pump_active or self.auto_mode.get()
+                    # --- CRITICAL CHANGE ---
+                    # Logic: Only count a stall if we are INTENDING to run.
+                    # 'self.pump_active' is now set to False inside global_emergency_stop.
+                    should_be_running = (self.pump_active or self.auto_mode.get()) and target > 100
 
-                    # 2. Stall Detection (Target high but RPM is zero)
-                    if is_active and target > 100 and self.actual_rpm < 10:
+                    if should_be_running and self.actual_rpm < 10:
                         stall_counter += 0.5 
                     else:
+                        # Reset counter if the pump starts spinning OR if we hit Global Stop
                         stall_counter = 0
                         self.motor_stalled = False
                         recovery_attempted = False 
 
-                    # 3. REVERSE NUDGE (Triggers at exactly 4 seconds)
-                    if stall_counter == 4.0 and not recovery_attempted:
-                        self.recovery_in_progress = True # ACTIVATE LOCK
+                    # 2. REVERSE NUDGE (at 4 seconds)
+                    if stall_counter == 4.0 and not recovery_attempted and not self.recovery_in_progress:
+                        self.recovery_in_progress = True # PRIORITY LOCK ON
                         self.log_msg("STALL DETECTED: Attempting Reverse-Nudge Recovery...")
                         
-                        # A. Force MST (Motor Stop) to clear persistent current
-                        stop_pk = struct.pack(">BBBBiB", 1, 3, 0, 0, 0, 4)
-                        self.safe_comm(PORT_BLOOD_PUMP, stop_pk, 9)
+                        # Stop -> Nudge -> Resume
+                        self.safe_comm(PORT_BLOOD_PUMP, struct.pack(">BBBBiB", 1, 3, 0, 0, 0, 4), 9)
                         threading.Event().wait(0.3)
                         
-                        # B. ROL (Rotate Left) nudge to shift Hall state
                         rev_pk = struct.pack(">BBBBi", 1, 2, 0, 0, 800)
                         self.safe_comm(PORT_BLOOD_PUMP, rev_pk + struct.pack("B", sum(rev_pk)%256), 9)
                         threading.Event().wait(0.5)
                         
-                        # C. Resume and release lock
-                        self.recovery_in_progress = False # RELEASE LOCK
+                        self.recovery_in_progress = False # PRIORITY LOCK OFF
                         self.send_pump_cmd(int(target))
                         recovery_attempted = True
 
-                    # 4. FINAL FAIL-SAFE (Triggers at 10 seconds)
+                    # 3. FINAL FAIL-SAFE (at 10 seconds)
                     if stall_counter >= 10.0:
                         self.motor_stalled = True
-                        self.log_msg("CRITICAL: Stall Recovery Failed. Emergency Stop.")
-                        self.global_emergency_stop()
+                        self.log_msg("CRITICAL: Stall Recovery Failed. Power Cut.")
+                        self.global_emergency_stop() 
                         stall_counter = 0
 
-                # --- Drive Thermal Check ---
+                # --- Thermal Check ---
                 t_body = struct.pack(">BBBBi", 1, 6, 132, 0, 0)
                 t_reply = self.safe_comm(PORT_BLOOD_PUMP, t_body + struct.pack("B", sum(t_body)%256), 9)
                 if t_reply and len(t_reply) == 9:
@@ -372,30 +372,37 @@ class ClinicalConsole:
         
         self.root.after(1000, self.check_heartbeat_status)
 
-    def global_emergency_stop(self):
-        # 1. Lock out all other pump commands immediately
+    ef global_emergency_stop(self):
+        # 1. PRIORITY LOCK: Stop all background pump loops immediately
         self.recovery_in_progress = True 
+        self.pump_active = False  # Tells the stall logic we are now intended to be idle
         
-        # 2. Kill all auto-modes
+        # 2. De-energize Heaters and Auto-Modes
         self.auto_mode.set(False)
         self.temp_auto_mode.set(False)
         self.heater_pwm.set(0)
-        self.send_b1_cmd() # Update heater board immediately
+        self.send_b1_cmd() # Update heater board immediately to 0 PWM
         
-        # 3. Direct Motor Stop (MST) - Bypass send_pump_cmd logic
-        # Instruction 3, Type 0, Motor 0, Value 0
+        # 3. DIRECT HARDWARE STOP: Instruction 3 (MST) to the Blood Pump
+        # This bypasses the send_pump_cmd queue to ensure the MOSFETs open immediately
         stop_pk = struct.pack(">BBBBiB", 1, 3, 0, 0, 0, 4)
         self.safe_comm(PORT_BLOOD_PUMP, stop_pk, 9)
         
-        # 4. Reset other peripherals
-        self.air_pump_pct.set(0); self.gas_valve_pct.set(0); self.send_b2_gas_cmd()
+        # 4. RESET PERIPHERALS (Ensures nothing was deleted)
+        # Reset Gas Control (Board 2)
+        self.air_pump_pct.set(0)
+        self.gas_valve_pct.set(0)
+        self.send_b2_gas_cmd()
+        
+        # Stop Syringe Infusion Pumps
         for p in [PORT_UPPER_SYRINGE, PORT_LOWER_SYRINGE]:
             self.syringe_pump_action(p, "0", "STOP")
         
-        self.log_msg("GLOBAL STOP: All actuators de-energized.")
+        self.log_msg("GLOBAL STOP: System entering safe idle state.")
         
-        # 5. Optional: release lock after 1 second to allow manual restart
-        self.root.after(1000, lambda: setattr(self, 'recovery_in_progress', False))
+        # 5. Release Lock after 1.5 seconds
+        # This prevents the stall counter from "finishing" its old count during shutdown
+        self.root.after(1500, lambda: setattr(self, 'recovery_in_progress', False))
 
     def make_led(self, parent, text, color):
         f = tk.Frame(parent); f.pack(side=tk.LEFT, padx=5)
