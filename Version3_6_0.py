@@ -1,4 +1,4 @@
-# --- VERSION 3.5.6 ---
+# --- VERSION 3.6.0 ---
 # 1. FIXED: Added setpoint synchronization for Temperature PID in the master loop.
 # 2. FIXED: Swapped Air Pump and Gas Valve variable mapping to match hardware wiring. DV Changed 14/04/26
 # 3. SAFETY: Heater interlock forces 0 PWM if Pump fails or RPM < 150.
@@ -47,7 +47,7 @@ class PID:
 class ClinicalConsole:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kidney Device Console v3.5.6")
+        self.root.title("Kidney Device Console v3.6.0")
         self.root.geometry("1450x980")
         
         # --- UI Data State ---
@@ -62,6 +62,8 @@ class ClinicalConsole:
         self.motor_overheat = False
         self.pump_active = False # New flag to prevent idle stall warnings
         self.last_b1_receive_time = datetime.now() # track actual data arrival
+        self.recovery_in_progress = False  # NEW: Priority lock for safety commands
+        
         
         # PID Controllers
         self.auto_mode = tk.BooleanVar(value=False)
@@ -174,9 +176,14 @@ class ClinicalConsole:
         threading.Thread(target=self.safe_comm, args=(PORT_BOARD_2, pk.encode('ascii'), 20), daemon=True).start()
 
     def send_pump_cmd(self, rpm):
+        # Only block if we are in recovery AND the command is to move (>0)
+        if self.recovery_in_progress and rpm > 0:
+            return 
+            
         self.pump_active = True if rpm > 0 else False
         p_body = struct.pack(">BBBBi", 1, 1, 0, 0, rpm)
         pk = p_body + struct.pack("B", sum(p_body) % 256)
+        # Use a daemon thread to ensure UI doesn't hang on network lag
         threading.Thread(target=self.safe_comm, args=(PORT_BLOOD_PUMP, pk, 9), daemon=True).start()
 
     # --- UI LAYOUT ---
@@ -269,7 +276,7 @@ class ClinicalConsole:
             try:
                 if not self.root.winfo_exists(): break 
                 
-                # 1. Fetch Actual RPM from TMCM-163
+                # 1. Fetch Actual RPM
                 p_body = struct.pack(">BBBBi", 1, 6, 3, 0, 0)
                 reply = self.safe_comm(PORT_BLOOD_PUMP, p_body + struct.pack("B", sum(p_body)%256), 9)
                 
@@ -277,50 +284,55 @@ class ClinicalConsole:
                     self.actual_rpm = abs(struct.unpack(">i", reply[4:8])[0])
                     self.health_counts["BloodPump"] += 1
                     
-                    # Determine current target for comparison
-                    target = int(self.rpm_ent.get()) if not self.auto_mode.get() else self.press_pid.setpoint
-                    
-                    # 2. Monitor for Stall
-                    # Condition: Command is active and target is high, but motor isn't spinning
+                    # Determine target (Manual Entry or PID Setpoint)
+                    try:
+                        target = int(self.rpm_ent.get()) if not self.auto_mode.get() else self.press_pid.setpoint
+                    except: target = 0
+
                     is_active = self.pump_active or self.auto_mode.get()
+
+                    # 2. Stall Detection (Target high but RPM is zero)
                     if is_active and target > 100 and self.actual_rpm < 10:
                         stall_counter += 0.5 
                     else:
-                        # Reset if motor starts spinning or is turned off
                         stall_counter = 0
                         self.motor_stalled = False
                         recovery_attempted = False 
 
-                    # 3. REVERSE NUDGE (Trigger at 4 seconds)
+                    # 3. REVERSE NUDGE (Triggers at exactly 4 seconds)
                     if stall_counter == 4.0 and not recovery_attempted:
-                        self.log_msg("Stall detected. Attempting Reverse-Nudge Recovery...")
+                        self.recovery_in_progress = True # ACTIVATE LOCK
+                        self.log_msg("STALL DETECTED: Attempting Reverse-Nudge Recovery...")
                         
-                        # Command: ROL (Rotate Left) at speed 600
-                        # Instruction 2, Type 0, Motor 0, Value 600
-                        rev_pk = struct.pack(">BBBBi", 1, 2, 0, 0, 600)
-                        self.safe_comm(PORT_BLOOD_PUMP, rev_pk + struct.pack("B", sum(rev_pk)%256), 0)
+                        # A. Force MST (Motor Stop) to clear persistent current
+                        stop_pk = struct.pack(">BBBBiB", 1, 3, 0, 0, 0, 4)
+                        self.safe_comm(PORT_BLOOD_PUMP, stop_pk, 9)
+                        threading.Event().wait(0.3)
                         
-                        threading.Event().wait(0.4) # Brief nudge
+                        # B. ROL (Rotate Left) nudge to shift Hall state
+                        rev_pk = struct.pack(">BBBBi", 1, 2, 0, 0, 800)
+                        self.safe_comm(PORT_BLOOD_PUMP, rev_pk + struct.pack("B", sum(rev_pk)%256), 9)
+                        threading.Event().wait(0.5)
                         
-                        # Resume original forward command
-                        self.send_pump_cmd(target)
+                        # C. Resume and release lock
+                        self.recovery_in_progress = False # RELEASE LOCK
+                        self.send_pump_cmd(int(target))
                         recovery_attempted = True
 
-                    # 4. FINAL FAIL-SAFE (Trigger at 10 seconds)
+                    # 4. FINAL FAIL-SAFE (Triggers at 10 seconds)
                     if stall_counter >= 10.0:
                         self.motor_stalled = True
-                        self.log_msg("CRITICAL: Stall Recovery Failed. Emergency Stop Issued.")
+                        self.log_msg("CRITICAL: Stall Recovery Failed. Emergency Stop.")
                         self.global_emergency_stop()
                         stall_counter = 0
 
-                # 5. DRIVE THERMAL CHECK (Axis Parameter 132)
+                # --- Drive Thermal Check ---
                 t_body = struct.pack(">BBBBi", 1, 6, 132, 0, 0)
                 t_reply = self.safe_comm(PORT_BLOOD_PUMP, t_body + struct.pack("B", sum(t_body)%256), 9)
                 if t_reply and len(t_reply) == 9:
                     self.motor_overheat = True if struct.unpack(">i", t_reply[4:8])[0] == 1 else False
 
-            except (tk.TclError, RuntimeError, AttributeError):
-                break
+            except (tk.TclError, RuntimeError, AttributeError): break
             threading.Event().wait(0.5)
 
     def parse_board_one(self, l):
@@ -361,9 +373,29 @@ class ClinicalConsole:
         self.root.after(1000, self.check_heartbeat_status)
 
     def global_emergency_stop(self):
-        self.auto_mode.set(False); self.temp_auto_mode.set(False); self.heater_pwm.set(0); self.send_b1_cmd()
-        self.send_pump_cmd(0); self.air_pump_pct.set(0); self.gas_valve_pct.set(0); self.send_b2_gas_cmd()
-        for p in [PORT_UPPER_SYRINGE, PORT_LOWER_SYRINGE]: self.syringe_pump_action(p, "0", "STOP")
+        # 1. Lock out all other pump commands immediately
+        self.recovery_in_progress = True 
+        
+        # 2. Kill all auto-modes
+        self.auto_mode.set(False)
+        self.temp_auto_mode.set(False)
+        self.heater_pwm.set(0)
+        self.send_b1_cmd() # Update heater board immediately
+        
+        # 3. Direct Motor Stop (MST) - Bypass send_pump_cmd logic
+        # Instruction 3, Type 0, Motor 0, Value 0
+        stop_pk = struct.pack(">BBBBiB", 1, 3, 0, 0, 0, 4)
+        self.safe_comm(PORT_BLOOD_PUMP, stop_pk, 9)
+        
+        # 4. Reset other peripherals
+        self.air_pump_pct.set(0); self.gas_valve_pct.set(0); self.send_b2_gas_cmd()
+        for p in [PORT_UPPER_SYRINGE, PORT_LOWER_SYRINGE]:
+            self.syringe_pump_action(p, \"0\", \"STOP\")
+        
+        self.log_msg("GLOBAL STOP: All actuators de-energized.")
+        
+        # 5. Optional: release lock after 1 second to allow manual restart
+        self.root.after(1000, lambda: setattr(self, 'recovery_in_progress', False))
 
     def make_led(self, parent, text, color):
         f = tk.Frame(parent); f.pack(side=tk.LEFT, padx=5)
