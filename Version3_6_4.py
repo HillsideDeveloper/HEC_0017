@@ -136,31 +136,31 @@ class ClinicalConsole:
             threading.Event().wait(1.0)
 
     # --- COMMUNICATIONS ---
-   def safe_comm(self, port, payload, rx_len=0):
-    with self.cmd_lock:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                # Proposed Hardening
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+     def safe_comm(self, port, payload, rx_len=0):
+        with self.cmd_lock:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    # Proposed Hardening
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
                 
-                s.settimeout(1.2) # Consistent with 3.6.3 timeout
-                s.connect((ES_IP, port))
-                s.sendall(payload)
+                    s.settimeout(1.2) # Consistent with 3.6.3 timeout
+                    s.connect((ES_IP, port))
+                    s.sendall(payload)
 
-                # Set success flags only if connect/send succeeded
-                if port == PORT_BLOOD_PUMP: self.port_status["Pump"] = True
-                if port == PORT_BOARD_1: self.port_status["Board1"] = True
+                    # Set success flags only if connect/send succeeded
+                    if port == PORT_BLOOD_PUMP: self.port_status["Pump"] = True
+                    if port == PORT_BOARD_1: self.port_status["Board1"] = True
 
-                if rx_len > 0: 
-                    return s.recv(rx_len)
-                else: 
-                    return s.recv(1024)
-        except:
-            # Explicitly set failure flags for immediate interlock response
-            if port == PORT_BLOOD_PUMP: self.port_status["Pump"] = False
-            if port == PORT_BOARD_1: self.port_status["Board1"] = False
-            return None
+                    if rx_len > 0: 
+                        return s.recv(rx_len)
+                    else: 
+                        return s.recv(1024)
+            except:
+                # Explicitly set failure flags for immediate interlock response
+                if port == PORT_BLOOD_PUMP: self.port_status["Pump"] = False
+                if port == PORT_BOARD_1: self.port_status["Board1"] = False
+                return None
 
     def send_b1_cmd(self):
         self.last_b1_send_time = datetime.now()
