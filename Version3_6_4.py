@@ -140,7 +140,7 @@ class ClinicalConsole:
             threading.Event().wait(1.0)
 
     # --- COMMUNICATIONS ---
-     def safe_comm(self, port, payload, rx_len=0):
+    def safe_comm(self, port, payload, rx_len=0):
         with self.cmd_lock:
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
