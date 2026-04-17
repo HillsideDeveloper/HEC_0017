@@ -1,4 +1,4 @@
-# --- VERSION 3.6.3 ---
+# --- VERSION 3.6.4 ---
 # 1. FIXED: Added setpoint synchronization for Temperature PID in the master loop.
 # 2. FIXED: Swapped Air Pump and Gas Valve variable mapping to match hardware wiring. DV Changed 14/04/26
 # 3. SAFETY: Heater interlock forces 0 PWM if Pump fails or RPM < 150.
@@ -47,7 +47,7 @@ class PID:
 class ClinicalConsole:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kidney Device Console v3.6.3")
+        self.root.title("Kidney Device Console v3.6.4")
         self.root.geometry("1450x980")
         
         # --- UI Data State ---
@@ -136,26 +136,31 @@ class ClinicalConsole:
             threading.Event().wait(1.0)
 
     # --- COMMUNICATIONS ---
-    def safe_comm(self, port, packet, expected_len):
-        acquired = self.cmd_lock.acquire(timeout=2.0)
-        if not acquired: return None 
-        res = None
+   def safe_comm(self, port, payload, rx_len=0):
+    with self.cmd_lock:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(1.2); s.connect((ES_IP, port)); s.sendall(packet)
-                if expected_len > 0: 
-                    res = s.recv(expected_len)
+                # Proposed Hardening
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+                
+                s.settimeout(1.2) # Consistent with 3.6.3 timeout
+                s.connect((ES_IP, port))
+                s.sendall(payload)
+
+                # Set success flags only if connect/send succeeded
+                if port == PORT_BLOOD_PUMP: self.port_status["Pump"] = True
+                if port == PORT_BOARD_1: self.port_status["Board1"] = True
+
+                if rx_len > 0: 
+                    return s.recv(rx_len)
                 else: 
-                    res = s.recv(1024)
-            if port == PORT_BLOOD_PUMP: self.port_status["Pump"] = True
-            if port == PORT_BOARD_1: self.port_status["Board1"] = True
-            return res 
+                    return s.recv(1024)
         except:
+            # Explicitly set failure flags for immediate interlock response
             if port == PORT_BLOOD_PUMP: self.port_status["Pump"] = False
             if port == PORT_BOARD_1: self.port_status["Board1"] = False
             return None
-        finally: 
-            self.cmd_lock.release()
 
     def send_b1_cmd(self):
         self.last_b1_send_time = datetime.now()
@@ -362,36 +367,38 @@ class ClinicalConsole:
         
         self.root.after(1000, self.check_heartbeat_status)
 
+    def on_closing(self):
+        """Polite shutdown sequence for UI exit."""
+        try:
+            self.log_msg("System shutting down. Entering safe state...")
+            # Trigger emergency stop to kill heaters/pumps
+            self.global_emergency_stop()
+            # Brief wait for packets to clear
+            threading.Event().wait(0.5)
+        finally:
+            self.root.destroy()
+            os._exit(0) # Force exit all daemon threads
+       
     def global_emergency_stop(self):
         # 1. PRIORITY LOCK: Stop all background pump loops immediately
         self.recovery_in_progress = True 
-        self.pump_active = False  # Tells the stall logic we are now intended to be idle
+        self.pump_active = False  # Resets stall detection logic
         
-        # 2. De-energize Heaters and Auto-Modes
         self.auto_mode.set(False)
         self.temp_auto_mode.set(False)
         self.heater_pwm.set(0)
-        self.send_b1_cmd() # Update heater board immediately to 0 PWM
+        self.send_b1_cmd()
         
-        # 3. DIRECT HARDWARE STOP: Instruction 3 (MST) to the Blood Pump
-        # This bypasses the send_pump_cmd queue to ensure the MOSFETs open immediately
+        # Immediate Hardware Stop (Instruction 3)
         stop_pk = struct.pack(">BBBBiB", 1, 3, 0, 0, 0, 4)
         self.safe_comm(PORT_BLOOD_PUMP, stop_pk, 9)
         
-        # 4. RESET PERIPHERALS (Ensures nothing was deleted)
-        # Reset Gas Control (Board 2)
-        self.air_pump_pct.set(0)
-        self.gas_valve_pct.set(0)
-        self.send_b2_gas_cmd()
-        
-        # Stop Syringe Infusion Pumps
+        self.air_pump_pct.set(0); self.gas_valve_pct.set(0); self.send_b2_gas_cmd()
         for p in [PORT_UPPER_SYRINGE, PORT_LOWER_SYRINGE]:
             self.syringe_pump_action(p, "0", "STOP")
         
-        self.log_msg("GLOBAL STOP: System entering safe idle state.")
-        
-        # 5. Release Lock after 1.5 seconds
-        # This prevents the stall counter from "finishing" its old count during shutdown
+        self.log_msg("GLOBAL STOP: All actuators de-energized.")
+        # Release lock after 1.5s to clear old buffers
         self.root.after(1500, lambda: setattr(self, 'recovery_in_progress', False))
 
     def make_led(self, parent, text, color):
@@ -500,4 +507,13 @@ class ClinicalConsole:
         else: self.is_logging = False; self.btn_log.config(text="Start Recording", bg="#f0f0f0", fg="black")
 
 if __name__ == "__main__":
-    root = tk.Tk(); app = ClinicalConsole(root); root.mainloop()
+    import time
+    # MANDATORY: Allow ES-279/Network hardware 15 seconds to 
+    # fully initialize before the UI tries to open the sockets.
+    time.sleep(15) 
+    
+    root = tk.Tk()
+    app = ClinicalConsole(root)
+    # Ensure polite closure when the 'X' is clicked
+    root.protocol("WM_DELETE_WINDOW", app.on_closing)
+    root.mainloop()
