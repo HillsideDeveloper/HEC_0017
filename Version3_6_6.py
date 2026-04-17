@@ -1,4 +1,4 @@
-# --- VERSION 3.6.5 ---
+# --- VERSION 3.6.6 ---
 # 1. FIXED: Added setpoint synchronization for Temperature PID in the master loop.
 # 2. FIXED: Swapped Air Pump and Gas Valve variable mapping to match hardware wiring. DV Changed 14/04/26
 # 3. SAFETY: Heater interlock forces 0 PWM if Pump fails or RPM < 150.
@@ -47,7 +47,7 @@ class PID:
 class ClinicalConsole:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kidney Device Console v3.6.5")
+        self.root.title("Kidney Device Console v3.6.6")
         self.root.geometry("1450x980")
         
         # --- UI Data State ---
@@ -77,7 +77,7 @@ class ClinicalConsole:
         self.temp_auto_mode = tk.BooleanVar(value=False)
         self.temp_setpoint = tk.DoubleVar(value=37.0)
         # Thermal anti-windup limit maintained at 1500
-        self.temp_pid = PID(kp=10.0, ki=0.1, kd=12.0, setpoint=37.0, output_limits=(0, 240), windup_limit=400) #updated DV 17/04/26 16:00
+        self.temp_pid = PID(kp=15.0, ki=0.1, kd=12.0, setpoint=37.0, output_limits=(0, 240), windup_limit=1500) #updated DV 17/04/26 16:21
         
         self.last_b1_send_time = datetime.now()
         self.last_terumo_packet_time = datetime.now()
