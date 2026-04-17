@@ -54,6 +54,10 @@ class ClinicalConsole:
         self.ph_val = "--.--"; self.po2_val = "--.--"; self.pco2_val = "--.--"
         self.temp_val = "0.00"; self.press_val = "0.00"; self.flow_val = "0.00"
         self.actual_rpm = 0
+
+        # --- logging variables ---
+        self.is_logging = False
+        self.log_filepath = None
         
         # Health Tracking Flags
         self.port_status = {"Pump": True, "Terumo": True, "Board1": True}
@@ -246,19 +250,38 @@ class ClinicalConsole:
 
     # --- UI & LOGGING ---
     def refresh_ui_labels(self):
-        if not self.root.winfo_exists(): return # Stop if window is closed
+        if not self.root.winfo_exists(): return 
         try:
-            self.metrics["TEMP"].config(text=self.temp_val); self.metrics["PRESS"].config(text=self.press_val)
-            self.metrics["PH"].config(text=self.ph_val); self.metrics["FLOW"].config(text=self.flow_val)
+            # Update UI Indicators
+            self.metrics["TEMP"].config(text=self.temp_val)
+            self.metrics["PRESS"].config(text=self.press_val)
+            self.metrics["PH"].config(text=self.ph_val)
+            self.metrics["FLOW"].config(text=self.flow_val)
             self.rpm_actual_lbl.config(text=f"Actual: {self.actual_rpm} RPM")
             
             self.press_chk.config(fg="red" if self.auto_mode.get() else "black")
             self.temp_chk.config(fg="orange" if self.temp_auto_mode.get() else "black")
             
+            # --- VERIFIED LOGGING DATA ROW WRITER ---
+            if self.is_logging and self.log_filepath:
+                try:
+                    with open(self.log_filepath, 'a', newline='') as f:
+                        csv.writer(f).writerow([
+                            datetime.now().strftime('%H:%M:%S'),
+                            self.ph_val, self.pco2_val, self.po2_val,
+                            self.temp_val, self.actual_rpm, 
+                            self.press_val, self.flow_val
+                        ])
+                except Exception as e:
+                    self.log_msg(f"Logging Write Error: {e}")
+            # ----------------------------------------
+
             if self.log_counter % 20 == 0: self.update_flow_graph()
             self.log_counter += 1
             self.log_led.itemconfig(self.log_circle, fill="blue" if self.is_logging else "gray")
-        except: pass
+        except Exception as ui_err:
+            print(f"UI Refresh Warning: {ui_err}")
+            
         self.root.after(500, self.refresh_ui_labels)
 
     def update_flow_graph(self):
