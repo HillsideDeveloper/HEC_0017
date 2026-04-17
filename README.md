@@ -1,4 +1,4 @@
-# Kidney Perfusion Control System v3.5.6
+# Kidney Perfusion Control System v3.6.4
 
 A high-resilience clinical console for ex-vivo kidney perfusion, running on Raspberry Pi 5.
 Includes PID controllers for perfusate temperature and arterial pressure with user selectable
@@ -38,4 +38,5 @@ OS hardening is tailored for appliance mode with disabled power-saving and scree
 ## Installation
 1. Ensure `python3-tk` and `python3-matplotlib` are installed.
 2. Configure ES-279 to the static IP `192.168.127.254`.
-3. Run `main.py`.
+3. To run in virtual environment on Pi5 rename to main.py and move to the kidney_app folder.  launch.sh in the autorun folder will start the application automatically and recovery in the event of crash.
+4. Run `main.py`.  # should happen automatically
