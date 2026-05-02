@@ -1,4 +1,4 @@
-# --- VERSION 3.6.4 ---
+# --- VERSION 3.6.5 ---
 # 1. FIXED: Added setpoint synchronization for Temperature PID in the master loop.
 # 2. FIXED: Swapped Air Pump and Gas Valve variable mapping to match hardware wiring. DV Changed 14/04/26
 # 3. SAFETY: Heater interlock forces 0 PWM if Pump fails or RPM < 150.
@@ -7,6 +7,7 @@
 # 6. Now checking for motor stall or Drive Over Temperature Flag and adding safety features.
 # 7. Added some logic to supress pump errors when idle not stalled.
 # 8. Now includes stall recovery
+# 9. Includes bug fix for pO2 and pCO2 display
 
 import tkinter as tk
 from tkinter import scrolledtext, filedialog, messagebox
@@ -47,7 +48,7 @@ class PID:
 class ClinicalConsole:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kidney Device Console v3.6.4")
+        self.root.title("Kidney Device Console v3.6.5")
         self.root.geometry("1450x980")
         
         # --- UI Data State ---
@@ -253,6 +254,10 @@ class ClinicalConsole:
         if not self.root.winfo_exists(): return 
         try:
             # Update UI Indicators
+            # --- ADDED THESE TWO LINES TO FIX DISPLAY ERROR ---
+            self.metrics["PCO2"].config(text=self.pco2_val)
+            self.metrics["PO2"].config(text=self.po2_val)
+            # ---------------------------------------------------
             self.metrics["TEMP"].config(text=self.temp_val)
             self.metrics["PRESS"].config(text=self.press_val)
             self.metrics["PH"].config(text=self.ph_val)
