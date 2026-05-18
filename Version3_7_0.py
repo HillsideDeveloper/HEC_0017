@@ -1,4 +1,4 @@
-# --- VERSION 3.6.5 ---
+# --- VERSION 3.7.0 ---
 # 1. FIXED: Added setpoint synchronization for Temperature PID in the master loop.
 # 2. FIXED: Swapped Air Pump and Gas Valve variable mapping to match hardware wiring. DV Changed 14/04/26
 # 3. SAFETY: Heater interlock forces 0 PWM if Pump fails or RPM < 150.
@@ -8,6 +8,7 @@
 # 7. Added some logic to supress pump errors when idle not stalled.
 # 8. Now includes stall recovery
 # 9. Includes bug fix for pO2 and pCO2 display
+# 10. Major update in response to the issue with Board 1 communication.  This version adds a specific safety sequence.
 
 import tkinter as tk
 from tkinter import scrolledtext, filedialog, messagebox
@@ -48,7 +49,7 @@ class PID:
 class ClinicalConsole:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kidney Device Console v3.6.5")
+        self.root.title("Kidney Device Console v3.7.0")
         self.root.geometry("1450x980")
         
         # --- UI Data State ---
@@ -63,6 +64,12 @@ class ClinicalConsole:
         # Health Tracking Flags
         self.port_status = {"Pump": True, "Terumo": True, "Board1": True}
         self.health_counts = {"Terumo": 0, "Board1": 0, "BloodPump": 0}
+        # --- FIXED FOR HARDWARE WATCHDOG RESET TRIPPING ---
+        import time
+        self.last_b1_data_time = time.time()
+        self.b1_watchdog_mute_until = 0.0
+        self.b1_error_printed = False
+        self.b1_critical_printed = False
         self.motor_stalled = False
         self.motor_overheat = False
         self.pump_active = False # New flag to prevent idle stall warnings
@@ -108,6 +115,7 @@ class ClinicalConsole:
 
     # --- MASTER CONTROL LOOP (1Hz) ---
     def master_control_loop(self):
+        import time
         while True:
             # Sync Setpoints from UI to PID Instance
             try:
@@ -115,29 +123,67 @@ class ClinicalConsole:
                 self.temp_pid.setpoint = float(self.temp_setpoint.get())
             except ValueError: pass
 
-            # 1. Pressure PID
-            b1_age = (datetime.now() - self.last_b1_send_time).total_seconds()
-            if self.auto_mode.get() and b1_age < 5.0:
-                try:
-                    p_adj = self.press_pid.update(float(self.press_val))
-                    new_rpm = max(min(self.actual_rpm + int(p_adj), 3500), 0)
-                    if abs(p_adj) > 2:
-                        self.send_pump_cmd(new_rpm)
-                except: pass
+            # Calculate data age metrics and establish logging timestamps
+            current_unix_time = time.time()
+            b1_data_age = current_unix_time - self.last_b1_data_time
+            timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-            # 2. Temperature PID (Interlock: Pump must be OK and moving > 150 RPM)
-            if self.temp_auto_mode.get() and self.port_status["Pump"] and self.actual_rpm > 150:
-                try:
-                    t_out = self.temp_pid.update(float(self.temp_val))
-                    self.heater_pwm.set(int(t_out))
-                except: pass
-            else:
+            # --- STATE 3: CRITICAL HARDWARE FAULT (> 30 SECONDS UNRESPONSIVE) ---
+            if b1_data_age > 30.0:
                 self.heater_pwm.set(0)
+                self.send_pump_cmd(1000) # Safe background perfusion speed
+                self.log_led.itemconfig(self.log_circle, fill="red")
+                
+                if not self.b1_critical_printed:
+                    self.log_msg(f"[{timestamp_str}] !!! CRITICAL HARDWARE FAULT !!!")
+                    self.log_msg(f"[{timestamp_str}] Board One data stream missing for {int(b1_data_age)}s.")
+                    self.log_msg(f"[{timestamp_str}] System entering permanent hardware stall watch.")
+                    self.b1_critical_printed = True
 
-            # 3. Watchdog Pulse
-            if (datetime.now() - self.last_b1_send_time).total_seconds() > 2.0:
-                self.send_b1_cmd()
-            
+            # --- STATE 2: INTERMITTENT HANG / DATA TIME OUT (2.0 TO 30.0 SECONDS) ---
+            elif b1_data_age > 2.0:
+                self.heater_pwm.set(0)
+                self.send_pump_cmd(1000) # Maintain safe minimal flow rate
+                self.log_led.itemconfig(self.log_circle, fill="yellow")
+
+                # If we just crossed the error threshold, initiate the 10-second silent reboot window
+                if self.b1_watchdog_mute_until <= current_unix_time:
+                    # Enforce a 12-second total blackout to reliably trip the PIC's 8-second watchdog
+                    self.b1_watchdog_mute_until = current_unix_time + 12.0
+
+                if not self.b1_error_printed:
+                    self.log_msg(f"[{timestamp_str}] Error detected on board one.")
+                    self.log_msg(f"[{timestamp_str}] Waiting for system reset...")
+                    self.log_msg(f"[{timestamp_str}] Heater off and pump set to 1000 RPM.")
+                    self.log_msg(f"[{timestamp_str}] Standby...")
+                    self.b1_error_printed = True
+
+            # --- STATE 1: NORMAL CONTROL (DATA FRESHNESS IS SOUND, < 2.0 SECONDS) ---
+            else:
+                # 1. Pressure PID
+                b1_age = (datetime.now() - self.last_b1_send_time).total_seconds()
+                if self.auto_mode.get() and b1_age < 5.0:
+                    try:
+                        p_adj = self.press_pid.update(float(self.press_val))
+                        new_rpm = max(min(self.actual_rpm + int(p_adj), 3500), 0)
+                        if abs(p_adj) > 2:
+                            self.send_pump_cmd(new_rpm)
+                    except: pass
+
+                # 2. Temperature PID (Interlock: Pump must be OK and moving > 150 RPM)
+                if self.temp_auto_mode.get() and self.port_status["Pump"] and self.actual_rpm > 150:
+                    try:
+                        t_out = self.temp_pid.update(float(self.temp_val))
+                        self.heater_pwm.set(int(t_out))
+                    except: pass
+                else:
+                    self.heater_pwm.set(0)
+
+                # 3. Normal Watchdog Pulse (Only fired if we aren't within the mute window)
+                if (datetime.now() - self.last_b1_send_time).total_seconds() > 2.0:
+                    self.send_b1_cmd()
+
+            # Maintain original script structural loop timing (1 second ticks)
             threading.Event().wait(1.0)
 
     # --- COMMUNICATIONS ---
@@ -168,11 +214,22 @@ class ClinicalConsole:
                 return None
 
     def send_b1_cmd(self):
+        # --- HARDWARE WATCHDOG INTERLOCK RESET TIMEOUT CHECK ---
+        import time
+        if time.time() < self.b1_watchdog_mute_until:
+            return  # Drop outbound packets completely to force the PIC firmware watchdog to trip
+            
         self.last_b1_send_time = datetime.now()
-        g = 0x08 # Fixed Heat Direction
+        g = 0x08  # Fixed Heat Direction 
+        
+        # Constructs the raw data payload padding strings to exactly 3 digits
         pay = f"{str(g).zfill(3)}{str(self.heater_pwm.get()).zfill(3)}000"
+        
+        # Calculates the bitwise 2's complement checksum matching the PIC's parser rules
         cs = (sum(ord(c) for c in pay) & 0xFF) ^ 0xFF
         pk = f"{pay}{str(cs).zfill(3)}\r"
+        
+        # Dispatches the packet asynchronously to prevent UI thread stuttering
         threading.Thread(target=self.safe_comm, args=(PORT_BOARD_1, pk.encode('ascii'), 0), daemon=True).start()
 
     def send_b2_gas_cmd(self):
@@ -360,12 +417,19 @@ class ClinicalConsole:
 
     def parse_board_one(self, l):
         if "A," in l:
+            # --- FAIL-SAFE NETWORK TIMESTAMPS & ERROR STATE RESETS ---
+            import time
+            self.last_b1_data_time = time.time()  # Non-blocking float Unix timestamp
+            self.b1_error_printed = False         # Reset intermittent error console log latch
+            self.b1_critical_printed = False      # Reset critical stall watch console log latch
+            
             self.health_counts["Board1"] += 1
             self.last_b1_receive_time = datetime.now() # Update on successful receive
             try:
                 p = l.split(',')
+                # Maintained explicit variable indexing and string floating precision formatting
                 self.press_val, self.flow_val = f"{float(p[4]):.2f}", f"{float(p[6]):.2f}"
-            except: pass
+            except: pass 
 
     def parse_terumo(self, l):
         f = [x.strip() for x in l.split('\t') if x.strip()]
