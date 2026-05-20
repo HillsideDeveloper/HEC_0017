@@ -1,4 +1,4 @@
-# --- VERSION 3.7.0 ---
+# --- VERSION 3.7.1 ---
 # 1. FIXED: Added setpoint synchronization for Temperature PID in the master loop.
 # 2. FIXED: Swapped Air Pump and Gas Valve variable mapping to match hardware wiring. DV Changed 14/04/26
 # 3. SAFETY: Heater interlock forces 0 PWM if Pump fails or RPM < 150.
@@ -57,7 +57,7 @@ class PID:
 class ClinicalConsole:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kidney Device Console v3.7.0")
+        self.root.title("Kidney Device Console v3.7.1")
         self.root.geometry("1450x980")
         
         # --- UI Data State (Strings for formatting precision) ---
@@ -150,7 +150,12 @@ class ClinicalConsole:
         if b1_data_age > 30.0:
             self.heater_pwm.set(0)
             self.send_pump_cmd(1000) # Safe background perfusion speed
-            self.log_led.itemconfig(self.log_circle, fill="red")
+            
+            # BLINKING RED: Alternate between red and gray every second based on log counter
+            if self.log_counter % 2 == 0:
+                self.run_led.itemconfig(self.run_circle, fill="red")
+            else:
+                self.run_led.itemconfig(self.run_circle, fill="gray")
             
             if not self.b1_critical_printed:
                 self.log_msg(f"!!! CRITICAL HARDWARE FAULT !!!")
@@ -162,7 +167,12 @@ class ClinicalConsole:
         elif b1_data_age > 2.0:
             self.heater_pwm.set(0)
             self.send_pump_cmd(1000) # Maintain safe minimal flow rate
-            self.log_led.itemconfig(self.log_circle, fill="yellow")
+            
+            # FLASHING YELLOW: Alternate between yellow and gray every second
+            if self.log_counter % 2 == 0:
+                self.run_led.itemconfig(self.run_circle, fill="yellow")
+            else:
+                self.run_led.itemconfig(self.run_circle, fill="gray")
 
             # If we just crossed the error threshold, initiate the 12-second silent reboot window
             if self.b1_watchdog_mute_until <= current_unix_time:
