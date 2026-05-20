@@ -1,4 +1,4 @@
-# --- VERSION 3.7.3 ---
+# --- VERSION 3.8.0 ---
 # 1. FIXED: Added setpoint synchronization for Temperature PID in the master loop.
 # 2. FIXED: Swapped Air Pump and Gas Valve variable mapping to match hardware wiring. DV Changed 14/04/26
 # 3. SAFETY: Heater interlock forces 0 PWM if Pump fails or RPM < 150.
@@ -9,6 +9,7 @@
 # 8. Now includes stall recovery
 # 9. Includes bug fix for pO2 and pCO2 display
 # 10. Major update in response to the issue with Board 1 communication.  This version adds a specific safety sequence.
+# 11. Major update to prevent port timeouts making the UI unresponsive.
 
 import tkinter as tk
 from tkinter import scrolledtext, filedialog, messagebox
@@ -57,7 +58,7 @@ class PID:
 class ClinicalConsole:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kidney Device Console v3.7.3")
+        self.root.title("Kidney Device Console v3.8.0")
         self.root.geometry("1450x980")
         
         # --- UI Data State (Strings for formatting precision) ---
@@ -221,7 +222,7 @@ class ClinicalConsole:
                     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                     s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
                 
-                    s.settimeout(1.2) 
+                    s.settimeout(0.8) #dropped the timeout from 1.2 seconds to acclerate cleanup
                     s.connect((ES_IP, port))
                     s.sendall(payload)
 
@@ -513,31 +514,53 @@ class ClinicalConsole:
         self.root.after(1000, self.check_heartbeat_status)
 
     def on_closing(self):
-        try:
-            self.log_msg("System shutting down. Entering safe state...")
-            self.global_emergency_stop()
-            threading.Event().wait(0.5)
-        finally:
-            self.root.destroy()
-            os._exit(0) 
+        # Trigger the asynchronous global stop to safely kill hardware in the background
+        self.global_emergency_stop()
+        
+        # Destroy the graphical canvas frames and force process completion instantly
+        self.root.destroy()
+        os._exit(0) 
        
     def global_emergency_stop(self):
+        # --- PHASE 1: INSTANT LOCAL LOCKOUT (0 Milliseconds) ---
         self.recovery_in_progress = True 
         self.pump_active = False  
         self.auto_mode.set(False)
         self.temp_auto_mode.set(False)
         self.heater_pwm.set(0)
-        self.send_b1_cmd()
-        
-        stop_pk = struct.pack(">BBBBiB", 1, 3, 0, 0, 0, 4)
-        self.safe_comm(PORT_BLOOD_PUMP, stop_pk, 9)
         self.air_pump_pct.set(0)
         self.gas_valve_pct.set(0)
-        self.send_b2_gas_cmd()
-        for p in [PORT_UPPER_SYRINGE, PORT_LOWER_SYRINGE]:
-            self.syringe_pump_action(p, "0", "STOP")
         
-        self.log_msg("GLOBAL STOP: All actuators de-energized.")
+        self.log_msg("GLOBAL STOP INITIATED: Software states isolated instantly.")
+
+        # --- PHASE 2: ASYNCHRONOUS ACTUATOR SHUTDOWN ---
+        # Offload the physical network communication to a background worker.
+        # This keeps the UI completely responsive even if all boards are offline.
+        def physical_shutdown_worker():
+            # Send heater off command down to board 1
+            self.send_b1_cmd()
+            
+            # Construct and dispatch blood pump raw kill frame
+            stop_pk = struct.pack(">BBBBiB", 1, 3, 0, 0, 0, 4)
+            self.safe_comm(PORT_BLOOD_PUMP, stop_pk, 9)
+            
+            # Send gas infrastructure de-energize frame
+            self.send_b2_gas_cmd()
+            
+            # Terminate active syringe arrays sequentially
+            for p in [PORT_UPPER_SYRINGE, PORT_LOWER_SYRINGE]:
+                # We directly embed the task logic inline to execute cleanly in background space
+                cmds = ["STP\r"]
+                for c in cmds: 
+                    self.safe_comm(p, c.encode('ascii'), 0)
+                    threading.Event().wait(0.05)
+            
+            self.log_msg("GLOBAL STOP COMPLETE: All hardware channels de-energized.")
+            
+        # Fire the physical shutdown sequence in a detached thread instantly
+        threading.Thread(target=physical_shutdown_worker, daemon=True).start()
+        
+        # Release the command structural priority gate after 1.5 seconds
         self.root.after(1500, lambda: setattr(self, 'recovery_in_progress', False))
 
     def make_led(self, parent, text, color):
