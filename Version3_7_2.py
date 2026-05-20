@@ -1,4 +1,4 @@
-# --- VERSION 3.7.1 ---
+# --- VERSION 3.7.2 ---
 # 1. FIXED: Added setpoint synchronization for Temperature PID in the master loop.
 # 2. FIXED: Swapped Air Pump and Gas Valve variable mapping to match hardware wiring. DV Changed 14/04/26
 # 3. SAFETY: Heater interlock forces 0 PWM if Pump fails or RPM < 150.
@@ -57,7 +57,7 @@ class PID:
 class ClinicalConsole:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kidney Device Console v3.7.1")
+        self.root.title("Kidney Device Console v3.7.2")
         self.root.geometry("1450x980")
         
         # --- UI Data State (Strings for formatting precision) ---
@@ -291,7 +291,7 @@ class ClinicalConsole:
         db.pack(fill=tk.X, pady=5)
         self.metrics = {}
         ly = [("PH", "pH", "black"), ("PO2", "pO2 kpa", "blue"), ("PCO2", "pCO2 kpa", "purple"),
-              ("PRESS", "Pressure mmHg", "darkred"), ("FLOW", "Flow lpm", "darkgreen"), ("TEMP", "Temp C", "orange")]
+              ("PRESS", "Pressure mmHg", "darkred"), ("FLOW", "Flow mL/min", "darkgreen"), ("TEMP", "Temp C", "orange")]
         for i, (k, l, c) in enumerate(ly):
             f = tk.Frame(db, padx=25, pady=10)
             f.grid(row=i//3, column=i%3, sticky="w")
@@ -454,7 +454,9 @@ class ClinicalConsole:
             self.last_b1_receive_time = datetime.now() 
             try:
                 p = l.split(',')
-                self.press_val, self.flow_val = f"{float(p[4]):.2f}", f"{float(p[6]):.2f}"
+                # Scale flow from Liters per minute to Milliliters per minute (Lpm * 1000)
+                ml_flow = float(p[6]) * 1000.0
+                self.press_val, self.flow_val = f"{float(p[4]):.2f}", f"{ml_flow:.2f}"
             except: pass 
 
     def parse_terumo(self, l):
@@ -609,7 +611,7 @@ class ClinicalConsole:
             if path:
                 self.log_filepath = path
                 with open(path, 'w', newline='') as f:
-                    csv.writer(f).writerow(["Time", "pH", "pCO2", "pO2", "Temp", "RPM", "Pressure", "Flow"])
+                    csv.writer(f).writerow(["Time", "pH", "pCO2", "pO2", "Temp", "RPM", "Pressure", "Flow (mL/min)"])
                 self.is_logging = True
                 self.btn_log.config(text="STOP RECORDING", bg="blue", fg="white")
         else: 
