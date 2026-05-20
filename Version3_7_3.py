@@ -1,4 +1,4 @@
-# --- VERSION 3.7.2 ---
+# --- VERSION 3.7.3 ---
 # 1. FIXED: Added setpoint synchronization for Temperature PID in the master loop.
 # 2. FIXED: Swapped Air Pump and Gas Valve variable mapping to match hardware wiring. DV Changed 14/04/26
 # 3. SAFETY: Heater interlock forces 0 PWM if Pump fails or RPM < 150.
@@ -57,7 +57,7 @@ class PID:
 class ClinicalConsole:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kidney Device Console v3.7.2")
+        self.root.title("Kidney Device Console v3.7.3")
         self.root.geometry("1450x980")
         
         # --- UI Data State (Strings for formatting precision) ---
@@ -152,10 +152,10 @@ class ClinicalConsole:
             self.send_pump_cmd(1000) # Safe background perfusion speed
             
             # BLINKING RED: Alternate between red and gray every second based on log counter
-            if self.log_counter % 2 == 0:
-                self.run_led.itemconfig(self.run_circle, fill="red")
-            else:
-                self.run_led.itemconfig(self.run_circle, fill="gray")
+            #if self.log_counter % 2 == 0:
+                #self.run_led.itemconfig(self.run_circle, fill="red")
+            #else:
+                #self.run_led.itemconfig(self.run_circle, fill="gray")
             
             if not self.b1_critical_printed:
                 self.log_msg(f"!!! CRITICAL HARDWARE FAULT !!!")
@@ -169,10 +169,10 @@ class ClinicalConsole:
             self.send_pump_cmd(1000) # Maintain safe minimal flow rate
             
             # FLASHING YELLOW: Alternate between yellow and gray every second
-            if self.log_counter % 2 == 0:
-                self.run_led.itemconfig(self.run_circle, fill="yellow")
-            else:
-                self.run_led.itemconfig(self.run_circle, fill="gray")
+            #if self.log_counter % 2 == 0:
+                #self.run_led.itemconfig(self.run_circle, fill="yellow")
+            #else:
+                #self.run_led.itemconfig(self.run_circle, fill="gray")
 
             # If we just crossed the error threshold, initiate the 12-second silent reboot window
             if self.b1_watchdog_mute_until <= current_unix_time:
@@ -473,6 +473,9 @@ class ClinicalConsole:
 
     def check_heartbeat_status(self):
         if not self.root.winfo_exists(): return 
+        import time
+        
+        # 1. Evaluate standard timing thresholds exactly as before
         t_err = (datetime.now() - self.last_terumo_packet_time).total_seconds() > 15
         b1_err = (datetime.now() - self.last_b1_receive_time).total_seconds() > 5.0
         p_err = not self.port_status["Pump"]
@@ -480,8 +483,33 @@ class ClinicalConsole:
         has_error = t_err or b1_err or p_err or self.motor_stalled or self.motor_overheat
         all_ok = (not t_err) and (not b1_err) and (not p_err) and (not self.motor_stalled)
         
-        self.run_led.itemconfig(self.run_circle, fill="green" if all_ok else "gray")
+        # 2. Extract current data age metrics to handle the specific Board 1 safety overrides
+        b1_data_age = time.time() - self.last_b1_data_time
+
+        # --- COMBINED STATE ASSIGNMENTS FOR THE RUNNING LED ---
+        
+        # CONDITION C: CRITICAL HARDWARE FAULT (Blinking Red)
+        if b1_data_age > 30.0:
+            if self.log_counter % 2 == 0:
+                self.run_led.itemconfig(self.run_circle, fill="red")
+            else:
+                self.run_led.itemconfig(self.run_circle, fill="gray")
+                
+        # CONDITION B: INTERMITTENT HANG / WATCHDOG RESET RESET WINDOW (Flashing Yellow)
+        elif b1_data_age > 2.0:
+            if self.log_counter % 2 == 0:
+                self.run_led.itemconfig(self.run_circle, fill="yellow")
+            else:
+                self.run_led.itemconfig(self.run_circle, fill="gray")
+                
+        # CONDITION A: NORMAL ENVIRONMENT OPERATION (Solid Green or Gray fallback)
+        else:
+            self.run_led.itemconfig(self.run_circle, fill="green" if all_ok else "gray")
+
+        # 3. RED ERROR LED: Function remains completely unchanged from original specifications
         self.err_led.itemconfig(self.err_circle, fill="red" if has_error else "gray")
+        
+        # Register the next synchronous 1-second monitoring slice
         self.root.after(1000, self.check_heartbeat_status)
 
     def on_closing(self):
